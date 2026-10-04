@@ -601,8 +601,10 @@ func TestServer_maybeGenerateResourcesForMCPGateway(t *testing.T) {
 }
 
 // TestServer_createBackendListener_headerToMetadataRules pins the header_to_metadata rules the MCP
-// backend listener is built with: a stable order, and Remove set only for the internal metadata
-// headers that must not reach the upstream MCP server.
+// backend listener is built with: a stable order, and Remove set for every internal MCP header that
+// must not reach the upstream MCP server. All headers in MCPInternalHeadersToMetadata are internal
+// (the map's doc comment states they "do not survive to the router"), so all of them — including
+// x-ai-eg-mcp-backend — are stripped before the request is sent upstream.
 func TestServer_createBackendListener_headerToMetadataRules(t *testing.T) {
 	s := &Server{log: testr.New(t)}
 
@@ -630,7 +632,7 @@ func TestServer_createBackendListener_headerToMetadataRules(t *testing.T) {
 
 	got := rulesOf(t)
 	require.Equal(t, []rule{
-		{"x-ai-eg-mcp-backend", "mcp_backend", false},
+		{"x-ai-eg-mcp-backend", "mcp_backend", true},
 		{"x-ai-eg-mcp-metadata-method", "mcp_method", true},
 		{"x-ai-eg-mcp-metadata-request-id", "mcp_request_id", true},
 		{"x-ai-eg-mcp-metadata-resource-uri", "mcp_resource_uri", true},
