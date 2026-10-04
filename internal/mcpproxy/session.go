@@ -6,6 +6,7 @@
 package mcpproxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -423,12 +424,29 @@ func (s *session) sendRequestPerBackend(ctx context.Context, eventChan chan<- *b
 	var bodyReader io.Reader = httpResp.Body
 	switch httpResp.Header.Get("Content-Encoding") {
 	case "gzip":
-		gr, gzErr := gzip.NewReader(httpResp.Body)
-		if gzErr != nil {
-			return fmt.Errorf("failed to create gzip decompressor: %w", gzErr)
+		// gzip.NewReader validates the gzip header eagerly in its constructor
+		// and consumes bytes from the underlying reader into its own internal
+		// buffer. If a malformed peer sets Content-Encoding: gzip but sends a
+		// plain (non-gzipped) body, constructing the gzip reader would fail and
+		// discard the already-consumed bytes, masking the real upstream status
+		// code and body behind a decompressor error. Wrap the body in a buffered
+		// reader and peek the two-byte gzip magic (0x1f 0x8b, RFC 1952 §2.3.1)
+		// first; only construct the gzip reader when the body actually looks
+		// gzipped. The peeked bytes are not consumed and remain available for the
+		// fallback path, so non-2xx error bodies and 2xx SSE/JSON streams are
+		// surfaced/parsed verbatim when the Content-Encoding header is wrong.
+		br := bufio.NewReader(httpResp.Body)
+		if peeked, _ := br.Peek(2); len(peeked) == 2 && peeked[0] == 0x1f && peeked[1] == 0x8b {
+			gr, gzErr := gzip.NewReader(br)
+			if gzErr != nil {
+				bodyReader = br
+			} else {
+				defer gr.Close()
+				bodyReader = gr
+			}
+		} else {
+			bodyReader = br
 		}
-		defer gr.Close()
-		bodyReader = gr
 	case "br":
 		bodyReader = brotli.NewReader(httpResp.Body)
 	}
