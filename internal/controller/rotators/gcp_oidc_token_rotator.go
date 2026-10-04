@@ -293,10 +293,14 @@ func exchangeJWTForSTSToken(ctx context.Context, jwtToken string, wifConfig *aig
 		wifConfig.WorkloadIdentityProviderName)
 
 	// Create the token exchange request with the appropriate parameters.
+	stsScope := gcpIAMScope
+	if wifConfig.ServiceAccountImpersonation == nil {
+		stsScope = stsTokenScope
+	}
 	req := &sts.GoogleIdentityStsV1ExchangeTokenRequest{
 		GrantType:          grantTypeTokenExchange,
 		Audience:           stsAudience,
-		Scope:              gcpIAMScope,
+		Scope:              stsScope,
 		RequestedTokenType: tokenTypeAccessToken,
 		SubjectToken:       jwtToken,
 		SubjectTokenType:   tokenTypeJWT,
