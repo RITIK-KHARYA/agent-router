@@ -282,7 +282,11 @@ func (runCtx *runCmdContext) writeEnvoyResourcesAndRunExtProc(ctx context.Contex
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("error collecting: %w", err)
 	}
-	if len(gateways) > 1 {
+	switch len(gateways) {
+	case 0:
+		return nil, nil, 0, fmt.Errorf("no gateway found in the configuration: at least one Gateway resource is required")
+	case 1:
+	default:
 		return nil, nil, 0, fmt.Errorf("multiple gateways are not supported: %s", gateways[0].Name)
 	}
 	for _, bsp := range backendSecurityPolicies {

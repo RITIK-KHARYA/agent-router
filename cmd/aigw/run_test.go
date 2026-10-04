@@ -105,6 +105,38 @@ func TestRunCmdContext_writeEnvoyResourcesAndRunExtProc_noListeners(t *testing.T
 	require.EqualError(t, err, "gateway aigw-run has no listeners configured")
 }
 
+//go:embed testdata/no_gateway.yaml
+var noGatewayConfig string
+
+//go:embed testdata/no_gateway_with_route.yaml
+var noGatewayWithRouteConfig string
+
+func TestRunCmdContext_writeEnvoyResourcesAndRunExtProc_noGateway(t *testing.T) {
+	runCtx := &runCmdContext{
+		envoyGatewayResourcesOut: &bytes.Buffer{},
+		stderrLogger:             slog.New(slog.DiscardHandler),
+		stderr:                   io.Discard,
+		tmpdir:                   t.TempDir(),
+		udsPath:                  filepath.Join("/tmp", "run-test.sock"),
+	}
+
+	_, _, _, err := runCtx.writeEnvoyResourcesAndRunExtProc(t.Context(), noGatewayConfig)
+	require.EqualError(t, err, "no gateway found in the configuration: at least one Gateway resource is required")
+}
+
+func TestRunCmdContext_writeEnvoyResourcesAndRunExtProc_noGatewayWithRoute(t *testing.T) {
+	runCtx := &runCmdContext{
+		envoyGatewayResourcesOut: &bytes.Buffer{},
+		stderrLogger:             slog.New(slog.DiscardHandler),
+		stderr:                   io.Discard,
+		tmpdir:                   t.TempDir(),
+		udsPath:                  filepath.Join("/tmp", "run-test.sock"),
+	}
+
+	_, _, _, err := runCtx.writeEnvoyResourcesAndRunExtProc(t.Context(), noGatewayWithRouteConfig)
+	require.EqualError(t, err, "no gateway found in the configuration: at least one Gateway resource is required")
+}
+
 func Test_mustStartExtProc(t *testing.T) {
 	mockErr := errors.New("mock extproc error")
 	var capturedArgs []string
