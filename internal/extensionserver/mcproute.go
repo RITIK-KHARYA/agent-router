@@ -114,8 +114,8 @@ func (s *Server) createBackendListener(mcpHTTPFilters []*httpconnectionmanagerv3
 					Key:               internalapi.MCPInternalHeadersToMetadata[h],
 					Type:              htomv3.Config_STRING,
 				},
-				// If the header was an internal MCP header, we remove it before sending the request upstream.
-				Remove: strings.HasPrefix(h, internalapi.MCPMetadataHeaderPrefix),
+				// All headers in MCPInternalHeadersToMetadata are internal and must not reach the upstream.
+				Remove: true,
 			},
 		)
 	}
