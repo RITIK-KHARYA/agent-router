@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
@@ -718,6 +719,136 @@ func TestToAWSBedrockV1Tokenize_MessageConversion(t *testing.T) {
 		require.Equal(t, "result part 2", *toolResult.Content[1].Text)
 	})
 
+	t.Run("consecutive tool messages are coalesced into one user message", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfUser: &openai.ChatCompletionUserMessageParam{
+						Role:    openai.ChatMessageRoleUser,
+						Content: openai.StringOrUserRoleContentUnion{Value: "What's the weather and time in NYC?"},
+					},
+				},
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{
+								ID:   ptr.To("call_weather"),
+								Type: openai.ChatCompletionMessageToolCallTypeFunction,
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Name:      "get_weather",
+									Arguments: `{"location":"NYC"}`,
+								},
+							},
+							{
+								ID:   ptr.To("call_time"),
+								Type: openai.ChatCompletionMessageToolCallTypeFunction,
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Name:      "get_time",
+									Arguments: `{"timezone":"EST"}`,
+								},
+							},
+						},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						Role:       openai.ChatMessageRoleTool,
+						ToolCallID: "call_weather",
+						Content:    openai.ContentUnion{Value: "Sunny, 70F"},
+					},
+				},
+				{
+					OfTool: &openai.ChatCompletionToolMessageParam{
+						Role:       openai.ChatMessageRoleTool,
+						ToolCallID: "call_time",
+						Content:    openai.ContentUnion{Value: "12:00 EST"},
+					},
+				},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		// Three Bedrock messages: user, assistant (two tool uses), and a single
+		// coalesced user message containing both tool results — not four messages.
+		require.Len(t, bedrockReq.Input.Converse.Messages, 3)
+		third := bedrockReq.Input.Converse.Messages[2]
+		require.Equal(t, awsbedrock.ConversationRoleUser, third.Role)
+		require.Len(t, third.Content, 2)
+		require.NotNil(t, third.Content[0].ToolResult)
+		require.Equal(t, "call_weather", *third.Content[0].ToolResult.ToolUseID)
+		require.Equal(t, "Sunny, 70F", *third.Content[0].ToolResult.Content[0].Text)
+		require.NotNil(t, third.Content[1].ToolResult)
+		require.Equal(t, "call_time", *third.Content[1].ToolResult.ToolUseID)
+		require.Equal(t, "12:00 EST", *third.Content[1].ToolResult.Content[0].Text)
+	})
+
+	t.Run("three consecutive tool messages coalesce into one user message", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{ID: ptr.To("c1"), Type: openai.ChatCompletionMessageToolCallTypeFunction, Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "t1", Arguments: `{}`}},
+							{ID: ptr.To("c2"), Type: openai.ChatCompletionMessageToolCallTypeFunction, Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "t2", Arguments: `{}`}},
+							{ID: ptr.To("c3"), Type: openai.ChatCompletionMessageToolCallTypeFunction, Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "t3", Arguments: `{}`}},
+						},
+					},
+				},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "c1", Content: openai.ContentUnion{Value: "r1"}}},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "c2", Content: openai.ContentUnion{Value: "r2"}}},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "c3", Content: openai.ContentUnion{Value: "r3"}}},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		// Two messages: assistant (three tool uses), and a single coalesced user
+		// message with three toolResult blocks.
+		require.Len(t, bedrockReq.Input.Converse.Messages, 2)
+		coalesced := bedrockReq.Input.Converse.Messages[1]
+		require.Equal(t, awsbedrock.ConversationRoleUser, coalesced.Role)
+		require.Len(t, coalesced.Content, 3)
+		for idx, want := range []string{"c1", "c2", "c3"} {
+			require.NotNil(t, coalesced.Content[idx].ToolResult)
+			require.Equal(t, want, *coalesced.Content[idx].ToolResult.ToolUseID)
+		}
+	})
+
+	t.Run("coalescing stops at a non-tool message", func(t *testing.T) {
+		chatReq := &tokenize.ChatRequest{
+			Model: "anthropic.claude-3-opus-20240229-v1:0",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{ID: ptr.To("c1"), Type: openai.ChatCompletionMessageToolCallTypeFunction, Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "t1", Arguments: `{}`}},
+							{ID: ptr.To("c2"), Type: openai.ChatCompletionMessageToolCallTypeFunction, Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "t2", Arguments: `{}`}},
+						},
+					},
+				},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "c1", Content: openai.ContentUnion{Value: "r1"}}},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "c2", Content: openai.ContentUnion{Value: "r2"}}},
+				{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "thanks"}}},
+				{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "c3", Content: openai.ContentUnion{Value: "r3"}}},
+			},
+		}
+
+		bedrockReq, err := translator.tokenizeToBedrockCountTokens(chatReq)
+		require.NoError(t, err)
+		// assistant, coalesced user (c1+c2), user "thanks", user (c3 alone).
+		require.Len(t, bedrockReq.Input.Converse.Messages, 4)
+		require.Equal(t, awsbedrock.ConversationRoleUser, bedrockReq.Input.Converse.Messages[1].Role)
+		require.Len(t, bedrockReq.Input.Converse.Messages[1].Content, 2)
+		require.Len(t, bedrockReq.Input.Converse.Messages[3].Content, 1)
+		require.Equal(t, "c3", *bedrockReq.Input.Converse.Messages[3].Content[0].ToolResult.ToolUseID)
+	})
+
 	t.Run("system message with text parts content", func(t *testing.T) {
 		chatReq := &tokenize.ChatRequest{
 			Model: "anthropic.claude-3-opus-20240229-v1:0",
@@ -792,6 +923,73 @@ func TestToAWSBedrockV1Tokenize_MessageConversion(t *testing.T) {
 		require.Equal(t, "no_desc_tool", *bedrockReq.Input.Converse.ToolConfig.Tools[1].ToolSpec.Name)
 		require.Nil(t, bedrockReq.Input.Converse.ToolConfig.Tools[1].ToolSpec.Description)
 	})
+}
+
+// TestToAWSBedrockV1Tokenize_MultiToolParityWithChat asserts that the tokenize
+// translator produces the exact same Bedrock Converse `messages` array the chat
+// completion translator produces for the same OpenAI input. This locks the two
+// paths together so /tokenize counts exactly what /chat/completions sends,
+// including the standard OpenAI parallel-tool pattern (multiple consecutive
+// tool-result messages that must coalesce into one Bedrock user message).
+func TestToAWSBedrockV1Tokenize_MultiToolParityWithChat(t *testing.T) {
+	messages := []openai.ChatCompletionMessageParamUnion{
+		{
+			OfUser: &openai.ChatCompletionUserMessageParam{
+				Role:    openai.ChatMessageRoleUser,
+				Content: openai.StringOrUserRoleContentUnion{Value: "What's the weather and time in NYC?"},
+			},
+		},
+		{
+			OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+				Role: openai.ChatMessageRoleAssistant,
+				ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+					{
+						ID:   ptr.To("call_weather"),
+						Type: openai.ChatCompletionMessageToolCallTypeFunction,
+						Function: openai.ChatCompletionMessageToolCallFunctionParam{
+							Name:      "get_weather",
+							Arguments: `{"location":"NYC"}`,
+						},
+					},
+					{
+						ID:   ptr.To("call_time"),
+						Type: openai.ChatCompletionMessageToolCallTypeFunction,
+						Function: openai.ChatCompletionMessageToolCallFunctionParam{
+							Name:      "get_time",
+							Arguments: `{"timezone":"EST"}`,
+						},
+					},
+				},
+			},
+		},
+		{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "call_weather", Content: openai.ContentUnion{Value: "Sunny, 70F"}}},
+		{OfTool: &openai.ChatCompletionToolMessageParam{Role: openai.ChatMessageRoleTool, ToolCallID: "call_time", Content: openai.ContentUnion{Value: "12:00 EST"}}},
+		{OfUser: &openai.ChatCompletionUserMessageParam{Role: openai.ChatMessageRoleUser, Content: openai.StringOrUserRoleContentUnion{Value: "Summarize"}}},
+	}
+
+	// Tokenize path.
+	tokenizeTranslator := &ToAWSBedrockV1Tokenize{}
+	tokenizeBedrockReq, err := tokenizeTranslator.tokenizeToBedrockCountTokens(&tokenize.ChatRequest{
+		Model:    "anthropic.claude-3-opus-20240229-v1:0",
+		Messages: messages,
+	})
+	require.NoError(t, err)
+	require.Len(t, tokenizeBedrockReq.Input.Converse.Messages, 4)
+
+	// Chat path.
+	chatTranslator := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
+	var chatBedrockReq awsbedrock.ConverseInput
+	require.NoError(t, chatTranslator.openAIMessageToBedrockMessage(&openai.ChatCompletionRequest{
+		Model:    "anthropic.claude-3-opus-20240229-v1:0",
+		Messages: messages,
+	}, &chatBedrockReq))
+	require.Len(t, chatBedrockReq.Messages, 4)
+
+	tokenizeMessagesJSON, err := json.Marshal(tokenizeBedrockReq.Input.Converse.Messages)
+	require.NoError(t, err)
+	chatMessagesJSON, err := json.Marshal(chatBedrockReq.Messages)
+	require.NoError(t, err)
+	require.JSONEq(t, string(chatMessagesJSON), string(tokenizeMessagesJSON))
 }
 
 func TestToAWSBedrockV1Tokenize_CRISPrefixStripping(t *testing.T) {
