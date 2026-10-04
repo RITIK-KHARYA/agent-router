@@ -1034,6 +1034,144 @@ func TestAuthorizeRequest(t *testing.T) {
 			tool:          "tool1",
 			expectAllowed: false,
 		},
+		// The following cases verify that Source.JWT.Scopes narrow Deny rules, mirroring how
+		// claimsSatisfied already narrows Deny rules in the same block. A Deny rule with
+		// unsatisfied scopes must NOT match: it is skipped and the request falls through to a
+		// later rule or the DefaultAction. Challenge (WWW-Authenticate) tracking remains
+		// Allow-only.
+		{
+			// Deny rule narrowed by scopes — scope-holder is denied.
+			name: "deny rule with scopes only denies scope-holder",
+			auth: &filterapi.MCPRouteAuthorization{
+				DefaultAction: "Allow",
+				Rules: []filterapi.MCPRouteAuthorizationRule{{
+					Action: "Deny",
+					Source: &filterapi.MCPAuthorizationSource{
+						JWT: filterapi.JWTSource{Scopes: []string{"admin"}},
+					},
+					Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+				}},
+			},
+			headers:       http.Header{"Authorization": []string{"Bearer " + makeToken("admin")}},
+			backend:       "backend1",
+			tool:          "tool1",
+			expectAllowed: false,
+			expectScopes:  nil,
+		},
+		{
+			// Deny rule narrowed by scopes — non-scope-holder falls through to default Allow.
+			// This is the core of the bug: scopes must be enforced on Deny rules too.
+			name: "deny rule with scopes only falls through for non-scope-holder",
+			auth: &filterapi.MCPRouteAuthorization{
+				DefaultAction: "Allow",
+				Rules: []filterapi.MCPRouteAuthorizationRule{{
+					Action: "Deny",
+					Source: &filterapi.MCPAuthorizationSource{
+						JWT: filterapi.JWTSource{Scopes: []string{"admin"}},
+					},
+					Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+				}},
+			},
+			headers:       http.Header{"Authorization": []string{"Bearer " + makeToken("user")}},
+			backend:       "backend1",
+			tool:          "tool1",
+			expectAllowed: true,
+			expectScopes:  nil,
+		},
+		{
+			// Deny rule narrowed by claims AND scopes — claims match but scopes don't, so the
+			// rule is skipped and the request falls through to default Allow.
+			name: "deny rule with claims and scopes falls through when only claims match",
+			auth: &filterapi.MCPRouteAuthorization{
+				DefaultAction: "Allow",
+				Rules: []filterapi.MCPRouteAuthorizationRule{{
+					Action: "Deny",
+					Source: &filterapi.MCPAuthorizationSource{
+						JWT: filterapi.JWTSource{
+							Claims: []filterapi.JWTClaim{{
+								Name: "role", ValueType: filterapi.JWTClaimValueTypeString, Values: []string{"admin"},
+							}},
+							Scopes: []string{"admin"},
+						},
+					},
+					Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+				}},
+			},
+			headers:       http.Header{"Authorization": []string{"Bearer " + makeTokenWithClaims(jwt.MapClaims{"role": "admin"}, "user")}},
+			backend:       "backend1",
+			tool:          "tool1",
+			expectAllowed: true,
+			expectScopes:  nil,
+		},
+		{
+			// Deny rule narrowed by claims AND scopes — both match, so the deny fires.
+			name: "deny rule with claims and scopes denies when both match",
+			auth: &filterapi.MCPRouteAuthorization{
+				DefaultAction: "Allow",
+				Rules: []filterapi.MCPRouteAuthorizationRule{{
+					Action: "Deny",
+					Source: &filterapi.MCPAuthorizationSource{
+						JWT: filterapi.JWTSource{
+							Claims: []filterapi.JWTClaim{{
+								Name: "role", ValueType: filterapi.JWTClaimValueTypeString, Values: []string{"admin"},
+							}},
+							Scopes: []string{"admin"},
+						},
+					},
+					Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+				}},
+			},
+			headers:       http.Header{"Authorization": []string{"Bearer " + makeTokenWithClaims(jwt.MapClaims{"role": "admin"}, "admin")}},
+			backend:       "backend1",
+			tool:          "tool1",
+			expectAllowed: false,
+			expectScopes:  nil,
+		},
+		{
+			// A skipped scoped Deny rule must fall through to a subsequent Allow rule (not just
+			// the DefaultAction). The caller lacks the deny's required scope but holds the allow's
+			// required scope, so the request is allowed.
+			name: "skipped scoped deny rule falls through to subsequent allow rule",
+			auth: &filterapi.MCPRouteAuthorization{
+				DefaultAction: "Deny",
+				Rules: []filterapi.MCPRouteAuthorizationRule{
+					{
+						Action: "Deny",
+						Source: &filterapi.MCPAuthorizationSource{JWT: filterapi.JWTSource{Scopes: []string{"admin"}}},
+						Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+					},
+					{
+						Action: "Allow",
+						Source: &filterapi.MCPAuthorizationSource{JWT: filterapi.JWTSource{Scopes: []string{"read"}}},
+						Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+					},
+				},
+			},
+			headers:       http.Header{"Authorization": []string{"Bearer " + makeToken("read")}},
+			backend:       "backend1",
+			tool:          "tool1",
+			expectAllowed: true,
+			expectScopes:  nil,
+		},
+		{
+			// A scoped Deny rule that is skipped due to unsatisfied scopes must NOT contribute to
+			// the WWW-Authenticate challenge (challenge tracking is Allow-only). With a default
+			// Deny and no matching rule, the request is denied with no required scopes.
+			name: "skipped scoped deny rule does not contribute to scope challenge",
+			auth: &filterapi.MCPRouteAuthorization{
+				DefaultAction: "Deny",
+				Rules: []filterapi.MCPRouteAuthorizationRule{{
+					Action: "Deny",
+					Source: &filterapi.MCPAuthorizationSource{JWT: filterapi.JWTSource{Scopes: []string{"admin"}}},
+					Target: &filterapi.MCPAuthorizationTarget{Tools: []filterapi.ToolCall{{Backend: "backend1", Tool: "tool1"}}},
+				}},
+			},
+			headers:       http.Header{"Authorization": []string{"Bearer " + makeToken("read")}},
+			backend:       "backend1",
+			tool:          "tool1",
+			expectAllowed: false,
+			expectScopes:  nil,
+		},
 	}
 
 	for _, tt := range tests {
