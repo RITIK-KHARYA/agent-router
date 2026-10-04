@@ -226,12 +226,15 @@ func (m *mcpRequestContext) authorizeRequestWith(authorization *compiledAuthoriz
 				continue
 			}
 
-			// Scopes check doesn't make much sense if action is deny, we check it anyway.
+			// Scopes narrow the rule for both Allow and Deny actions, mirroring claimsSatisfied
+			// above: a rule with unsatisfied scopes does not match and falls through. The
+			// WWW-Authenticate challenge tracking only applies to a failed Allow rule.
 			requiredScopes := rule.Source.JWT.Scopes
-			// Keep track of the smallest set of required scopes for challenge when the action is allow and the request is denied.
-			if shouldAllow && !scopesSatisfied(ac.scopes, requiredScopes) {
-				if len(requiredScopesForChallenge) == 0 || len(requiredScopes) < len(requiredScopesForChallenge) {
-					requiredScopesForChallenge = requiredScopes
+			if !scopesSatisfied(ac.scopes, requiredScopes) {
+				if shouldAllow {
+					if len(requiredScopesForChallenge) == 0 || len(requiredScopes) < len(requiredScopesForChallenge) {
+						requiredScopesForChallenge = requiredScopes
+					}
 				}
 				continue
 			}
