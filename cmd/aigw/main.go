@@ -84,7 +84,11 @@ func (c *cmd) BeforeApply(_ *kong.Context) error {
 	c.StateHome = expandPath(c.StateHome)
 
 	if c.RuntimeDir == "" {
-		c.RuntimeDir = "/tmp/aigw-${UID}"
+		// Use the kernel-reported UID (os.Getuid) rather than the $UID env var,
+		// since $UID is a non-exported bash shell variable that is absent from the
+		// process environment. This ensures a per-user runtime directory on
+		// multi-user hosts instead of a shared /tmp/aigw- path.
+		c.RuntimeDir = fmt.Sprintf("/tmp/aigw-%d", os.Getuid())
 	}
 	c.RuntimeDir = expandPath(c.RuntimeDir)
 
