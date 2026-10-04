@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	fake2 "k8s.io/client-go/kubernetes/fake"
@@ -111,4 +112,64 @@ func TestAIServiceBackendController_Reconcile_error_with_multiple_bsps(t *testin
 	require.NoError(t, err)
 	_, err = c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: backendName}})
 	require.ErrorContains(t, err, `multiple BackendSecurityPolicies found for AIServiceBackend mybackend: [bsp-0 bsp-1 bsp-2 bsp-3 bsp-4]`)
+}
+
+// TestAIServiceBackendController_DeletionStuckWithMultipleBSPs verifies that a deleting
+// AIServiceBackend is garbage-collected even when multiple BackendSecurityPolicies target
+// it. The multi-BSP uniqueness check returns an error, but handleFinalizer must still run
+// (before that check) so the finalizer is removed and the object can be garbage-collected.
+// Without the fix, handleFinalizer is skipped by the multi-BSP early return and the object
+// stays pinned in Terminating until the operator resolves the duplicate-BSP state.
+func TestAIServiceBackendController_DeletionStuckWithMultipleBSPs(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	eventChan := internaltesting.NewControllerEventChan[*aigv1b1.AIGatewayRoute]()
+	c := NewAIServiceBackendController(fakeClient, fake2.NewClientset(), ctrl.Log, eventChan.Ch)
+
+	const backendName, namespace = "mybackend", "default"
+
+	// Create the backend and reconcile to add the finalizer.
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: backendName, Namespace: namespace},
+	}))
+	_, err := c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: backendName}})
+	require.NoError(t, err)
+
+	var backend aigv1b1.AIServiceBackend
+	require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: backendName}, &backend))
+	require.Contains(t, backend.Finalizers, aiGatewayControllerFinalizer, "finalizer should be added on first reconcile")
+
+	// Create two BackendSecurityPolicies targeting the backend to trigger the multi-BSP error.
+	for i := range 2 {
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.BackendSecurityPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: string(rune('a' + i)), Namespace: namespace},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: gwapiv1.ObjectName(backendName)}},
+			},
+		}))
+	}
+
+	// Delete the backend while the invalid multi-BSP state persists.
+	require.NoError(t, fakeClient.Delete(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: backendName, Namespace: namespace},
+	}))
+	_, err = c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: backendName}})
+	// The multi-BSP error must still propagate to the caller on the deletion path so the operator
+	// keeps the named NotAccepted diagnostic signal.
+	require.ErrorContains(t, err, "multiple BackendSecurityPolicies found for AIServiceBackend mybackend")
+
+	// The finalizer must be removed despite the multi-BSP error; otherwise the object is stuck in
+	// Terminating until the duplicate BSPs are resolved. With the fix, handleFinalizer runs first,
+	// so the fake client garbage-collects the object immediately and the subsequent Get is NotFound.
+	getErr := fakeClient.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: backendName}, &aigv1b1.AIServiceBackend{})
+	require.Error(t, getErr, "backend should be garbage-collected after finalizer removed on the deletion-time reconcile")
+	require.True(t, apierrors.IsNotFound(getErr), "expected NotFound after garbage collection, got: %v", getErr)
+
+	// Operator resolves the invalid state by deleting one duplicate BSP. A subsequent reconcile of
+	// the now-missing backend must be a no-op (NotFound handling), proving the controller remains
+	// stable after recovery and does not resurrect or error on the gone object.
+	require.NoError(t, fakeClient.Delete(t.Context(), &aigv1b1.BackendSecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: namespace},
+	}))
+	_, err = c.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: backendName}})
+	require.NoError(t, err, "reconcile of the now-missing backend must not error")
 }

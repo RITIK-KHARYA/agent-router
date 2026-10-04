@@ -65,6 +65,11 @@ func (c *AIBackendController) Reconcile(ctx context.Context, req reconcile.Reque
 // syncAIServiceBackend is the main logic for reconciling the AIServiceBackend resource.
 // This is decoupled from the Reconcile method to centralize the error handling and status updates.
 func (c *AIBackendController) syncAIServiceBackend(ctx context.Context, aiBackend *aigv1b1.AIServiceBackend) error {
+	// Propagate the bsp events all the way up to relevant Gateways regardless of being deleted or not.
+	// handleFinalizer runs before the multi-BSP uniqueness check below so the finalizer is removed on
+	// the deletion path even when that check (or a transient BSP-list failure) returns an error.
+	_ = handleFinalizer(ctx, c.client, c.logger, aiBackend, nil)
+
 	var backendSecurityPolicyList aigv1b1.BackendSecurityPolicyList
 	key := fmt.Sprintf("%s.%s", aiBackend.Name, aiBackend.Namespace)
 	if err := c.client.List(ctx, &backendSecurityPolicyList, client.InNamespace(aiBackend.Namespace),
@@ -81,8 +86,6 @@ func (c *AIBackendController) syncAIServiceBackend(ctx context.Context, aiBacken
 			aiBackend.Name, names)
 	}
 
-	// Propagate the bsp events all the way up to relevant Gateways regardless of being deleted or not.
-	_ = handleFinalizer(ctx, c.client, c.logger, aiBackend, nil)
 	// Notify the AI Gateway Route controller about the AIServiceBackend change.
 	var aiGatewayRoutes aigv1b1.AIGatewayRouteList
 	err := c.client.List(ctx, &aiGatewayRoutes, client.MatchingFields{k8sClientIndexBackendToReferencingAIGatewayRoute: key})
