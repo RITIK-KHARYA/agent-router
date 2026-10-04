@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -422,6 +423,75 @@ func Test_newHTTPRoute_MCPOauth(t *testing.T) {
 	require.Equal(t, "/.well-known/openid-configuration/mcp", ptr.Deref(oauthRules[2].Matches[0].Path.Value, ""))
 	for _, rule := range oauthRules {
 		require.Equal(t, mcpRoute.Spec.Headers, rule.Matches[0].Headers)
+	}
+}
+
+func Test_newHTTPRoute_MCPOauth_TrailingSlashPath(t *testing.T) {
+	// Regression test: when Spec.Path ends with a trailing slash (including the root "/"),
+	// all three well-known OAuth/OIDC metadata endpoints must be registered at their
+	// no-trailing-slash canonical form. The openid-configuration rule previously missed
+	// strings.TrimSuffix(servingPath, "/") that the two siblings applied, so it alone was
+	// registered with a trailing slash and 404'd for the canonical (no-trailing-slash)
+	// request under PathMatchExact.
+	cases := []struct {
+		name              string
+		path              string
+		protectedResource string
+		authServer        string
+		oidc              string
+	}{
+		{
+			name:              "trailing slash path /mcp/",
+			path:              "/mcp/",
+			protectedResource: "/.well-known/oauth-protected-resource/mcp",
+			authServer:        "/.well-known/oauth-authorization-server/mcp",
+			oidc:              "/.well-known/openid-configuration/mcp",
+		},
+		{
+			name:              "root path /",
+			path:              "/",
+			protectedResource: "/.well-known/oauth-protected-resource",
+			authServer:        "/.well-known/oauth-authorization-server",
+			oidc:              "/.well-known/openid-configuration",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := requireNewFakeClientWithIndexesForMCP(t)
+			eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+			ctrlr := NewMCPRouteController(c, nil, logr.Discard(), eventCh.Ch)
+
+			httpRoute := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "mcp-route", Namespace: "ns"}}
+			mcpRoute := &aigv1b1.MCPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcp-route", Namespace: "ns"},
+				Spec: aigv1b1.MCPRouteSpec{
+					SecurityPolicy: &aigv1b1.MCPRouteSecurityPolicy{OAuth: &aigv1b1.MCPRouteOAuth{}},
+					Path:           ptr.To(tc.path),
+					Headers:        []gwapiv1.HTTPHeaderMatch{{Name: "x-match", Value: "yes"}},
+					ParentRefs:     []gwapiv1.ParentReference{{Name: gwapiv1.ObjectName("gw")}},
+					BackendRefs:    []aigv1b1.MCPRouteBackendRef{{}},
+				},
+			}
+
+			err := ctrlr.newMainHTTPRoute(httpRoute, mcpRoute, mcpProxySharedBackendName)
+			require.NoError(t, err)
+
+			require.Len(t, httpRoute.Spec.Rules, 4) // 3 default routes for oauth which begins from index 1.
+			oauthRules := httpRoute.Spec.Rules[1:]
+			require.Equal(t, "oauth-protected-resource-metadata", string(ptr.Deref(oauthRules[0].Name, "")))
+			require.Equal(t, "oauth-authorization-server-metadata", string(ptr.Deref(oauthRules[1].Name, "")))
+			require.Equal(t, "oauth-authorization-server-metadata-oidc", string(ptr.Deref(oauthRules[2].Name, "")))
+			require.Equal(t, tc.protectedResource, ptr.Deref(oauthRules[0].Matches[0].Path.Value, ""))
+			require.Equal(t, tc.authServer, ptr.Deref(oauthRules[1].Matches[0].Path.Value, ""))
+			require.Equal(t, tc.oidc, ptr.Deref(oauthRules[2].Matches[0].Path.Value, ""))
+			// Ensure none of the well-known paths end with a trailing slash.
+			for _, rule := range oauthRules {
+				pathValue := ptr.Deref(rule.Matches[0].Path.Value, "")
+				require.False(t, strings.HasSuffix(pathValue, "/"),
+					"well-known path %q must not end with a trailing slash", pathValue)
+				require.Equal(t, mcpRoute.Spec.Headers, rule.Matches[0].Headers)
+			}
+		})
 	}
 }
 

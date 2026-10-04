@@ -394,7 +394,7 @@ func (c *MCPRouteController) newMainHTTPRoute(dst *gwapiv1.HTTPRoute, mcpRoute *
 			},
 		}
 		// Suffix path: /.well-known/openid-configuration{pathPrefix} (if pathPrefix exists).
-		authServerSuffixPathOIDC := fmt.Sprintf("%s%s", oidcWellKnownMetadataPath, servingPath)
+		authServerSuffixPathOIDC := fmt.Sprintf("%s%s", oidcWellKnownMetadataPath, strings.TrimSuffix(servingPath, "/"))
 		authServerSuffixRuleOIDC := gwapiv1.HTTPRouteRule{
 			Name: ptr.To(gwapiv1.SectionName("oauth-authorization-server-metadata-oidc")),
 			Matches: []gwapiv1.HTTPRouteMatch{
