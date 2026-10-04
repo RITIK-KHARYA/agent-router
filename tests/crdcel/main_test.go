@@ -334,7 +334,11 @@ func TestMCPRoutes(t *testing.T) {
 		{name: "authorization_cel_without_jwt_reference.yaml"},
 		{
 			name:   "authorization_claim_scope_reserved.yaml",
-			expErr: "spec.securityPolicy.authorization.rules[0].source.jwt.claims: Invalid value: \"array\": 'scope' claim name is reserved for OAuth scopes",
+			expErr: "spec.securityPolicy.authorization.rules[0].source.jwt.claims: Invalid value: \"array\": 'scope'/'scp' claim names are reserved for OAuth scopes; use the scopes field instead",
+		},
+		{
+			name:   "authorization_claim_scp_reserved.yaml",
+			expErr: "spec.securityPolicy.authorization.rules[0].source.jwt.claims: Invalid value: \"array\": 'scope'/'scp' claim names are reserved for OAuth scopes; use the scopes field instead",
 		},
 		{
 			name:   "authorization_jwt_missing_scopes_and_claims.yaml",

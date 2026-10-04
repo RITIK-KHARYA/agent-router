@@ -693,7 +693,7 @@ type JWTSource struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=16
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'scope')",message="'scope' claim name is reserved for OAuth scopes"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'scope' || c.name == 'scp')",message="'scope'/'scp' claim names are reserved for OAuth scopes; use the scopes field instead"
 	Claims []egv1a1.JWTClaim `json:"claims,omitempty"`
 }
 

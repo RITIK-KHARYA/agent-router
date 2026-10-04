@@ -901,9 +901,11 @@ spec:
                                       maxItems: 16
                                       type: array
                                       x-kubernetes-validations:
-                                      - message: '''scope'' claim name is reserved
-                                          for OAuth scopes'
-                                        rule: '!self.exists(c, c.name == ''scope'')'
+                                      - message: '''scope''/''scp'' claim names are
+                                          reserved for OAuth scopes; use the scopes
+                                          field instead'
+                                        rule: '!self.exists(c, c.name == ''scope''
+                                          || c.name == ''scp'')'
                                     scopes:
                                       description: |-
                                         Scopes defines the list of JWT scopes required for the rule.
@@ -7187,9 +7189,11 @@ spec:
                                       maxItems: 16
                                       type: array
                                       x-kubernetes-validations:
-                                      - message: '''scope'' claim name is reserved
-                                          for OAuth scopes'
-                                        rule: '!self.exists(c, c.name == ''scope'')'
+                                      - message: '''scope''/''scp'' claim names are
+                                          reserved for OAuth scopes; use the scopes
+                                          field instead'
+                                        rule: '!self.exists(c, c.name == ''scope''
+                                          || c.name == ''scp'')'
                                     scopes:
                                       description: |-
                                         Scopes defines the list of JWT scopes required for the rule.
