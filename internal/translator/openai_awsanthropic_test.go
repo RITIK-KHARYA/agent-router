@@ -871,3 +871,187 @@ func TestOpenAIToAWSAnthropicTranslator_EdgeCases(t *testing.T) {
 		assert.Equal(t, modelName, responseModel)
 	})
 }
+
+// TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_ReasoningContentIsPlainString
+// verifies the primary defect from the bug report: a non-streaming Anthropic
+// response with a thinking block must serialize `message.reasoning_content` as a
+// plain JSON string (the de-facto convention established by DeepSeek/vLLM/LiteLLM
+// and followed by #2524/#2319/#1995), not as a nested object. Schema-validating
+// OpenAI-compatible clients (Open WebUI, LiteLLM pydantic, @ai-sdk zod) reject the
+// object form.
+func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_ReasoningContentIsPlainString(t *testing.T) {
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "claude-sonnet-4-6")
+	anthropicResp := anthropic.Message{
+		ID:         "msg_01",
+		Type:       constant.ValueOf[constant.Message](),
+		Role:       constant.ValueOf[constant.Assistant](),
+		Content:    []anthropic.ContentBlockUnion{{Type: "thinking", Thinking: "Let me work through it.", Signature: "sig_abc"}, {Type: "text", Text: "21"}},
+		StopReason: anthropic.StopReasonEndTurn,
+		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 30},
+	}
+	body, err := json.Marshal(anthropicResp)
+	require.NoError(t, err)
+
+	_, openaiBody, _, _, err := translator.ResponseBody(
+		map[string]string{statusHeaderName: "200"}, bytes.NewReader(body), true, nil)
+	require.NoError(t, err)
+
+	// Wire shape: reasoning_content must be a plain JSON string, never an object.
+	rc := gjson.GetBytes(openaiBody, "choices.0.message.reasoning_content")
+	require.True(t, rc.Exists(), "reasoning_content should be present")
+	require.Falsef(t, rc.IsObject(), "reasoning_content must be a plain string, got an object: %s", rc.Raw)
+	require.Falsef(t, rc.IsArray(), "reasoning_content must be a plain string, got an array: %s", rc.Raw)
+	require.Equal(t, "Let me work through it.", rc.String())
+
+	// Typed shape: ReasoningContentUnion.Value must be a plain string.
+	var resp openai.ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(openaiBody, &resp))
+	require.Len(t, resp.Choices, 1)
+	msg := resp.Choices[0].Message
+	require.NotNil(t, msg.ReasoningContent)
+	strVal, ok := msg.ReasoningContent.Value.(string)
+	require.Truef(t, ok, "ReasoningContent.Value must be a string, got %T", msg.ReasoningContent.Value)
+	require.Equal(t, "Let me work through it.", strVal)
+
+	// The signature must survive in thinking_blocks (the plain string cannot carry it).
+	require.Len(t, msg.ThinkingBlocks, 1)
+	require.Equal(t, "thinking", msg.ThinkingBlocks[0].Type)
+	require.Equal(t, "Let me work through it.", msg.ThinkingBlocks[0].Thinking)
+	require.Equal(t, "sig_abc", msg.ThinkingBlocks[0].Signature)
+
+	// Sanity: text content still present.
+	require.NotNil(t, msg.Content)
+	require.Equal(t, "21", *msg.Content)
+}
+
+// TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_WithReasoningSignatureOnly
+// verifies that a thinking block carrying only a signature (empty text) — the
+// default `display: "omitted"` mode for Claude Opus/Sonnet — is not dropped. The
+// signature round-trips via thinking_blocks, and `reasoning_content` must be
+// entirely absent on the wire (no empty string).
+func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_WithReasoningSignatureOnly(t *testing.T) {
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "claude-sonnet-4-6")
+	anthropicResp := anthropic.Message{
+		ID:         "msg_omit",
+		Type:       constant.ValueOf[constant.Message](),
+		Role:       constant.ValueOf[constant.Assistant](),
+		Content:    []anthropic.ContentBlockUnion{{Type: "thinking", Thinking: "", Signature: "sig_omit_123"}, {Type: "text", Text: "21"}},
+		StopReason: anthropic.StopReasonEndTurn,
+		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 30},
+	}
+	body, err := json.Marshal(anthropicResp)
+	require.NoError(t, err)
+
+	_, openaiBody, _, _, err := translator.ResponseBody(
+		map[string]string{statusHeaderName: "200"}, bytes.NewReader(body), true, nil)
+	require.NoError(t, err)
+
+	// reasoning_content must not appear on the wire for a signature-only block.
+	rc := gjson.GetBytes(openaiBody, "choices.0.message.reasoning_content")
+	require.Falsef(t, rc.Exists(), "reasoning_content must be absent for a signature-only block, got %s", rc.Raw)
+
+	// thinking_blocks must preserve the signature.
+	tb := gjson.GetBytes(openaiBody, "choices.0.message.thinking_blocks")
+	require.Truef(t, tb.IsArray(), "thinking_blocks must be an array, got %s", tb.Raw)
+	arr := tb.Array()
+	require.Len(t, arr, 1)
+	require.Equal(t, "thinking", arr[0].Get("type").String())
+	require.Empty(t, arr[0].Get("thinking").String())
+	require.Equal(t, "sig_omit_123", arr[0].Get("signature").String())
+
+	var resp openai.ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(openaiBody, &resp))
+	require.Nil(t, resp.Choices[0].Message.ReasoningContent, "reasoning_content must be nil for a signature-only block")
+	require.Len(t, resp.Choices[0].Message.ThinkingBlocks, 1)
+	require.Equal(t, "sig_omit_123", resp.Choices[0].Message.ThinkingBlocks[0].Signature)
+}
+
+// TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_WithReasoningSignatureAndRedacted
+// verifies that multiple thinking-related blocks (thinking followed by
+// redacted_thinking) all survive in thinking_blocks instead of the last block
+// overwriting earlier ones. The thinking text/signature must be preserved
+// alongside the redacted payload.
+func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_WithReasoningSignatureAndRedacted(t *testing.T) {
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "claude-sonnet-4-6")
+	redactedBase64 := "cmVkYWN0ZWQ=" // opaque base64 blob as Anthropic returns it
+	anthropicResp := anthropic.Message{
+		ID:         "msg_red",
+		Type:       constant.ValueOf[constant.Message](),
+		Role:       constant.ValueOf[constant.Assistant](),
+		Content:    []anthropic.ContentBlockUnion{{Type: "thinking", Thinking: "Let me reason.", Signature: "sig_1"}, {Type: "redacted_thinking", Data: redactedBase64}, {Type: "text", Text: "42"}},
+		StopReason: anthropic.StopReasonEndTurn,
+		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 30},
+	}
+	body, err := json.Marshal(anthropicResp)
+	require.NoError(t, err)
+
+	_, openaiBody, _, _, err := translator.ResponseBody(
+		map[string]string{statusHeaderName: "200"}, bytes.NewReader(body), true, nil)
+	require.NoError(t, err)
+
+	// Both blocks must survive in thinking_blocks (no overwrite collapse).
+	tb := gjson.GetBytes(openaiBody, "choices.0.message.thinking_blocks")
+	require.Truef(t, tb.IsArray(), "thinking_blocks must be an array, got %s", tb.Raw)
+	arr := tb.Array()
+	require.Len(t, arr, 2, "both thinking and redacted_thinking blocks must survive")
+	require.Equal(t, "thinking", arr[0].Get("type").String())
+	require.Equal(t, "Let me reason.", arr[0].Get("thinking").String())
+	require.Equal(t, "sig_1", arr[0].Get("signature").String())
+	require.Equal(t, "redacted_thinking", arr[1].Get("type").String())
+	// Anthropic's data is an opaque base64 blob and must pass through unchanged.
+	require.Equal(t, redactedBase64, arr[1].Get("data").String())
+
+	// reasoning_content is the plain thinking text (not the redacted payload).
+	rc := gjson.GetBytes(openaiBody, "choices.0.message.reasoning_content")
+	require.True(t, rc.Exists())
+	require.False(t, rc.IsObject(), "reasoning_content must be a plain string")
+	require.Equal(t, "Let me reason.", rc.String())
+
+	var resp openai.ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(openaiBody, &resp))
+	require.Len(t, resp.Choices[0].Message.ThinkingBlocks, 2)
+	strVal, ok := resp.Choices[0].Message.ReasoningContent.Value.(string)
+	require.True(t, ok)
+	require.Equal(t, "Let me reason.", strVal)
+	require.Equal(t, redactedBase64, resp.Choices[0].Message.ThinkingBlocks[1].Data)
+}
+
+// TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_WithRedactedThinkingOnly
+// verifies that a response carrying only a redacted_thinking block (no
+// thinking text) emits no `reasoning_content` and surfaces the opaque payload in
+// thinking_blocks, passed through verbatim.
+func TestOpenAIToAWSAnthropicTranslatorV1ChatCompletion_ResponseBody_WithRedactedThinkingOnly(t *testing.T) {
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "claude-sonnet-4-6")
+	redactedBase64 := "RW5jcnlwdGVkIG9wYXF1ZSBkYXRh" // opaque base64 blob
+	anthropicResp := anthropic.Message{
+		ID:         "msg_only_red",
+		Type:       constant.ValueOf[constant.Message](),
+		Role:       constant.ValueOf[constant.Assistant](),
+		Content:    []anthropic.ContentBlockUnion{{Type: "redacted_thinking", Data: redactedBase64}, {Type: "text", Text: "done"}},
+		StopReason: anthropic.StopReasonEndTurn,
+		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 30},
+	}
+	body, err := json.Marshal(anthropicResp)
+	require.NoError(t, err)
+
+	_, openaiBody, _, _, err := translator.ResponseBody(
+		map[string]string{statusHeaderName: "200"}, bytes.NewReader(body), true, nil)
+	require.NoError(t, err)
+
+	rc := gjson.GetBytes(openaiBody, "choices.0.message.reasoning_content")
+	require.Falsef(t, rc.Exists(), "reasoning_content must be absent when only a redacted_thinking block is present, got %s", rc.Raw)
+
+	tb := gjson.GetBytes(openaiBody, "choices.0.message.thinking_blocks")
+	require.Truef(t, tb.IsArray(), "thinking_blocks must be an array, got %s", tb.Raw)
+	arr := tb.Array()
+	require.Len(t, arr, 1)
+	require.Equal(t, "redacted_thinking", arr[0].Get("type").String())
+	require.Equal(t, redactedBase64, arr[0].Get("data").String(), "redacted data must pass through verbatim, not be re-encoded")
+
+	var resp openai.ChatCompletionResponse
+	require.NoError(t, json.Unmarshal(openaiBody, &resp))
+	require.Nil(t, resp.Choices[0].Message.ReasoningContent)
+	require.Len(t, resp.Choices[0].Message.ThinkingBlocks, 1)
+	require.Equal(t, "redacted_thinking", resp.Choices[0].Message.ThinkingBlocks[0].Type)
+	require.Equal(t, redactedBase64, resp.Choices[0].Message.ThinkingBlocks[0].Data)
+}

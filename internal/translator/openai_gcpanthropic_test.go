@@ -571,14 +571,10 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 						Message: openai.ChatCompletionResponseChoiceMessage{
 							Role: "assistant",
 							ReasoningContent: &openai.ReasoningContentUnion{
-								Value: &openai.ReasoningContent{
-									ReasoningContent: &awsbedrock.ReasoningContentBlock{
-										ReasoningText: &awsbedrock.ReasoningTextBlock{
-											Text:      "Let me think about this...",
-											Signature: "signature_123",
-										},
-									},
-								},
+								Value: "Let me think about this...",
+							},
+							ThinkingBlocks: []openai.ThinkingBlock{
+								{Type: "thinking", Thinking: "Let me think about this...", Signature: "signature_123"},
 							},
 						},
 						FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
@@ -616,12 +612,12 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseBody(t *testing.
 						Index: 0,
 						Message: openai.ChatCompletionResponseChoiceMessage{
 							Role: "assistant",
-							ReasoningContent: &openai.ReasoningContentUnion{
-								Value: &openai.ReasoningContent{
-									ReasoningContent: &awsbedrock.ReasoningContentBlock{
-										RedactedContent: []byte("redacted_data_content"),
-									},
-								},
+							// A redacted_thinking block carries no reasoning text, so
+							// reasoning_content must be absent; the redacted payload
+							// survives in thinking_blocks. Anthropic's data is an opaque
+							// base64 string, passed through verbatim.
+							ThinkingBlocks: []openai.ThinkingBlock{
+								{Type: "redacted_thinking", Data: "redacted_data_content"},
 							},
 						},
 						FinishReason: openai.ChatCompletionChoicesFinishReasonStop,

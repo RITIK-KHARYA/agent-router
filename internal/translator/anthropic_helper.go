@@ -21,7 +21,6 @@ import (
 	openAIconstant "github.com/openai/openai-go/shared/constant"
 	"k8s.io/utils/ptr"
 
-	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai/tokenize"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -1391,27 +1390,29 @@ func messageToChatCompletion(anthropicResp *anthropic.Message, responseModel int
 				}
 			}
 		case string(constant.ValueOf[constant.Thinking]()):
+			// Reasoning text goes to the plain-string reasoning_content; signature and
+			// redacted content go to thinking_blocks (they cannot be represented in a
+			// plain string). This mirrors the streaming path, the Gemini helper, and the
+			// AWS Bedrock non-streaming path. See #2524/#2319/#1995 for the convention.
 			if output.Thinking != "" {
-				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{
-					Value: &openai.ReasoningContent{
-						ReasoningContent: &awsbedrock.ReasoningContentBlock{
-							ReasoningText: &awsbedrock.ReasoningTextBlock{
-								Text:      output.Thinking,
-								Signature: output.Signature,
-							},
-						},
-					},
-				}
+				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{Value: output.Thinking}
+			}
+			// Surface the block (text and/or signature) so a signature still
+			// round-trips even without accompanying text (e.g. display:"omitted").
+			if output.Thinking != "" || output.Signature != "" {
+				choice.Message.ThinkingBlocks = append(choice.Message.ThinkingBlocks, openai.ThinkingBlock{
+					Type: "thinking", Thinking: output.Thinking, Signature: output.Signature,
+				})
 			}
 		case string(constant.ValueOf[constant.RedactedThinking]()):
 			if output.Data != "" {
-				choice.Message.ReasoningContent = &openai.ReasoningContentUnion{
-					Value: &openai.ReasoningContent{
-						ReasoningContent: &awsbedrock.ReasoningContentBlock{
-							RedactedContent: []byte(output.Data),
-						},
-					},
-				}
+				// output.Data is already a base64-encoded opaque blob as returned by
+				// Anthropic; pass it through verbatim so it round-trips back unchanged
+				// (appendThinkingBlocks writes ThinkingBlock.Data straight back to the
+				// Anthropic redacted_thinking.data field). Re-encoding would corrupt it.
+				choice.Message.ThinkingBlocks = append(choice.Message.ThinkingBlocks, openai.ThinkingBlock{
+					Type: "redacted_thinking", Data: output.Data,
+				})
 			}
 		}
 	}
