@@ -215,6 +215,11 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 // This returns an error if the external processor fails to start, or nil otherwise. When the `ctx` is canceled,
 // the function will return nil.
 func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
+	// Derive a cancelable context so Main can unpark the shutdown goroutine when
+	// s.Serve fails before the caller cancels ctx; otherwise the goroutine would
+	// block forever on <-ctx.Done(). The caller's cancellation still propagates.
+	ctx, mainCancel := context.WithCancel(ctx)
+	defer mainCancel()
 	defer func() {
 		// Don't err the caller about normal shutdown scenarios.
 		if errors.Is(err, context.Canceled) || errors.Is(err, grpc.ErrServerStopped) {
@@ -422,7 +427,13 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	// Start HTTP admin server for metrics and health checks.
 	adminServer := startAdminServer(adminLis, l, promRegistry, healthClient)
 
+	// shutdownDone is closed when the shutdown goroutine finishes flushing the
+	// tracing/metrics exporters and draining the admin/MCP HTTP servers. Main
+	// blocks on it before returning so the process cannot exit (killing the
+	// goroutine) while buffered spans/metrics are still in flight.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.GracefulStop()
 
@@ -452,7 +463,19 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	// to avoid the deadlock in e2e tests where we wait for this message before proceeding, otherwise
 	// it would be extremely hard to debug issues where the external processor fails to start.
 	fmt.Fprintf(stderr, "AI Gateway External Processor is ready\n")
-	return s.Serve(extProcLis)
+	// Block until s.Serve returns, then synchronize with shutdown completion. On a
+	// graceful shutdown (ctx cancelled -> GracefulStop) Serve returns nil; wait for the
+	// goroutine to finish flushing/drain before returning so the process does not exit
+	// and kill the goroutine mid-flush. On an unexpected Serve error, cancel ctx so the
+	// goroutine unparks from <-ctx.Done(), wait for it, then propagate the error.
+	serveErr := s.Serve(extProcLis)
+	if serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) && !errors.Is(serveErr, context.Canceled) {
+		mainCancel()
+		<-shutdownDone
+		return serveErr
+	}
+	<-shutdownDone
+	return nil
 }
 
 func listen(ctx context.Context, name, network, address string) (net.Listener, error) {
