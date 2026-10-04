@@ -408,12 +408,16 @@ func TestInferencePoolController_HTTPRouteReferencesInferencePool(t *testing.T) 
 	}
 
 	// Test positive case.
-	result := c.httpRouteReferencesInferencePool(httpRoute, "test-inference-pool")
+	result := c.httpRouteReferencesInferencePool(httpRoute, "test-inference-pool", "default")
 	require.True(t, result, "Should return true when HTTPRoute references the InferencePool")
 
 	// Test negative case - different name.
-	result = c.httpRouteReferencesInferencePool(httpRoute, "different-pool")
+	result = c.httpRouteReferencesInferencePool(httpRoute, "different-pool", "default")
 	require.False(t, result, "Should return false when HTTPRoute doesn't reference the InferencePool")
+
+	// Test negative case - different namespace (backendRef defaults to the route's namespace "default").
+	result = c.httpRouteReferencesInferencePool(httpRoute, "test-inference-pool", "other-namespace")
+	require.False(t, result, "Should return false when InferencePool is in a different namespace than the backendRef")
 
 	// Test HTTPRoute without InferencePool backend.
 	httpRouteNoInferencePool := &gwapiv1.HTTPRoute{
@@ -438,7 +442,7 @@ func TestInferencePoolController_HTTPRouteReferencesInferencePool(t *testing.T) 
 		},
 	}
 
-	result = c.httpRouteReferencesInferencePool(httpRouteNoInferencePool, "test-inference-pool")
+	result = c.httpRouteReferencesInferencePool(httpRouteNoInferencePool, "test-inference-pool", "default")
 	require.False(t, result, "Should return false when HTTPRoute doesn't have InferencePool backend")
 }
 
@@ -1739,4 +1743,199 @@ func TestInferencePoolController_UpdateInferencePoolStatus_ExtensionRefError(t *
 	require.Equal(t, metav1.ConditionFalse, resolvedRefsCondition.Status, "ResolvedRefs should be False for ExtensionReference error")
 	require.Equal(t, "ResolvedRefs", resolvedRefsCondition.Reason)
 	require.Contains(t, resolvedRefsCondition.Message, extRefErrorMessage)
+}
+
+// TestInferencePoolController_CrossNamespaceBackendReferences verifies that a cross-namespace
+// InferencePool backend reference (route in ns-a, pool in ns-b, BackendRef.Namespace=ns-b) is
+// correctly reported in the pool's Status.Parents and that the event handlers enqueue the pool
+// in the BackendRef namespace rather than the route's namespace.
+func TestInferencePoolController_CrossNamespaceBackendReferences(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesAndInferencePool(t)
+	c := NewInferencePoolController(fakeClient, kubefake.NewSimpleClientset(), ctrl.Log, make(chan event.GenericEvent))
+	ctx := context.Background()
+
+	// Gateway lives in the route's namespace ns-a.
+	require.NoError(t, fakeClient.Create(ctx, &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns-a"},
+		Spec:       gwapiv1.GatewaySpec{GatewayClassName: "test-class"},
+	}))
+
+	poolNS := gwapiv1.Namespace("ns-b")
+	// AIGatewayRoute in ns-a references the InferencePool in ns-b via BackendRef.Namespace=ns-b.
+	require.NoError(t, fakeClient.Create(ctx, &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns-a"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			ParentRefs: []gwapiv1.ParentReference{{Name: "gw"}},
+			Rules: []aigv1b1.AIGatewayRouteRule{{
+				BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{
+					Name: "pool-x", Namespace: &poolNS,
+					Group:  ptr.To("inference.networking.k8s.io"),
+					Kind:   ptr.To("InferencePool"),
+					Weight: ptr.To(int32(100)),
+				}},
+			}},
+		},
+	}))
+
+	// EPP service for the pool lives in ns-b.
+	require.NoError(t, fakeClient.Create(ctx, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "epp-svc", Namespace: "ns-b"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 9002}}},
+	}))
+
+	// The real InferencePool the route references lives in ns-b.
+	require.NoError(t, fakeClient.Create(ctx, &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-x", Namespace: "ns-b"},
+		Spec: gwaiev1.InferencePoolSpec{
+			Selector:          gwaiev1.LabelSelector{MatchLabels: map[gwaiev1.LabelKey]gwaiev1.LabelValue{"app": "test-app"}},
+			TargetPorts:       []gwaiev1.Port{{Number: 8080}},
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "epp-svc"},
+		},
+	}))
+
+	// A same-named pool in the route's namespace ns-a must NOT be reported, since BackendRef
+	// explicitly targets ns-b. This guards against the old name-only matching behavior.
+	require.NoError(t, fakeClient.Create(ctx, &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-x", Namespace: "ns-a"},
+		Spec: gwaiev1.InferencePoolSpec{
+			Selector:          gwaiev1.LabelSelector{MatchLabels: map[gwaiev1.LabelKey]gwaiev1.LabelValue{"app": "test-app"}},
+			TargetPorts:       []gwaiev1.Port{{Number: 8080}},
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "epp-svc"},
+		},
+	}))
+
+	// Reconcile the real cross-ns pool in ns-b.
+	_, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: "pool-x", Namespace: "ns-b"}})
+	require.NoError(t, err)
+
+	var updatedPoolNSB gwaiev1.InferencePool
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: "pool-x", Namespace: "ns-b"}, &updatedPoolNSB))
+	require.Len(t, updatedPoolNSB.Status.Parents, 1, "cross-ns InferencePool in ns-b should report 1 attached gateway in Status.Parents")
+	require.Equal(t, "gw", string(updatedPoolNSB.Status.Parents[0].ParentRef.Name))
+	require.Equal(t, "ns-a", string(updatedPoolNSB.Status.Parents[0].ParentRef.Namespace))
+
+	// The decoy pool in ns-a must remain unreferenced (no parents), since the route's BackendRef
+	// explicitly points to ns-b and name-only matching must not pick up the ns-a pool.
+	var updatedPoolNSA gwaiev1.InferencePool
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: "pool-x", Namespace: "ns-a"}, &updatedPoolNSA))
+	require.Empty(t, updatedPoolNSA.Status.Parents, "same-named decoy pool in route namespace must not be reported")
+
+	// The AIGatewayRoute event handler must enqueue the pool in the BackendRef namespace (ns-b),
+	// not the route's namespace (ns-a).
+	aiReqs := c.aiGatewayRouteEventHandler(ctx, &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "ns-a"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{{
+				BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{
+					Name: "pool-x", Namespace: &poolNS,
+					Group: ptr.To("inference.networking.k8s.io"),
+					Kind:  ptr.To("InferencePool"),
+				}},
+			}},
+		},
+	})
+	require.Len(t, aiReqs, 1, "AIGatewayRoute handler should enqueue exactly one reconcile request")
+	require.Equal(t, "pool-x", aiReqs[0].Name)
+	require.Equal(t, "ns-b", aiReqs[0].Namespace, "AIGatewayRoute handler should enqueue the pool's (BackendRef) namespace, not the route's")
+
+	// The HTTPRoute event handler must enqueue the pool in the BackendRef namespace (ns-b).
+	hrNS := gwapiv1.Namespace("ns-b")
+	httpReqs := c.httpRouteEventHandler(ctx, &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-route", Namespace: "ns-a"},
+		Spec: gwapiv1.HTTPRouteSpec{
+			Rules: []gwapiv1.HTTPRouteRule{{
+				BackendRefs: []gwapiv1.HTTPBackendRef{{
+					BackendRef: gwapiv1.BackendRef{
+						BackendObjectReference: gwapiv1.BackendObjectReference{
+							Group:     ptr.To(gwapiv1.Group("inference.networking.k8s.io")),
+							Kind:      ptr.To(gwapiv1.Kind("InferencePool")),
+							Name:      "pool-x",
+							Namespace: &hrNS,
+						},
+					},
+				}},
+			}},
+		},
+	})
+	require.Len(t, httpReqs, 1, "HTTPRoute handler should enqueue exactly one reconcile request")
+	require.Equal(t, "pool-x", httpReqs[0].Name)
+	require.Equal(t, "ns-b", httpReqs[0].Namespace, "HTTPRoute handler should enqueue the pool's (BackendRef) namespace, not the route's")
+
+	// The Gateway event handler must enqueue the cross-ns pool that references this gateway.
+	gwReqs := c.gatewayEventHandler(ctx, &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns-a"},
+		Spec:       gwapiv1.GatewaySpec{GatewayClassName: "test-class"},
+	})
+	require.Len(t, gwReqs, 1, "Gateway handler should enqueue the cross-ns pool that references this gateway")
+	require.Equal(t, "pool-x", gwReqs[0].Name)
+	require.Equal(t, "ns-b", gwReqs[0].Namespace, "Gateway handler should enqueue the pool in ns-b, not the gateway's namespace ns-a")
+}
+
+// TestInferencePoolController_CrossNamespaceHTTPRouteAttachment verifies that the generated
+// HTTPRoute path (HTTPRoute in ns-a with BackendRef.Namespace=ns-b) is correctly attributed to
+// the pool in ns-b through gatewayReferencesInferencePool and the Gateway event handler.
+func TestInferencePoolController_CrossNamespaceHTTPRouteAttachment(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesAndInferencePool(t)
+	c := NewInferencePoolController(fakeClient, kubefake.NewSimpleClientset(), ctrl.Log, make(chan event.GenericEvent))
+	ctx := context.Background()
+
+	require.NoError(t, fakeClient.Create(ctx, &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns-a"},
+		Spec:       gwapiv1.GatewaySpec{GatewayClassName: "test-class"},
+	}))
+
+	require.NoError(t, fakeClient.Create(ctx, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "epp-svc", Namespace: "ns-b"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 9002}}},
+	}))
+	require.NoError(t, fakeClient.Create(ctx, &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-x", Namespace: "ns-b"},
+		Spec: gwaiev1.InferencePoolSpec{
+			Selector:          gwaiev1.LabelSelector{MatchLabels: map[gwaiev1.LabelKey]gwaiev1.LabelValue{"app": "test-app"}},
+			TargetPorts:       []gwaiev1.Port{{Number: 8080}},
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "epp-svc"},
+		},
+	}))
+
+	hrNS := gwapiv1.Namespace("ns-b")
+	// Generated HTTPRoute lives in ns-a (the AIGatewayRoute's namespace) and carries the
+	// InferencePool's namespace ns-b on its BackendRef.
+	require.NoError(t, fakeClient.Create(ctx, &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-route", Namespace: "ns-a"},
+		Spec: gwapiv1.HTTPRouteSpec{
+			CommonRouteSpec: gwapiv1.CommonRouteSpec{
+				ParentRefs: []gwapiv1.ParentReference{{Name: "gw"}},
+			},
+			Rules: []gwapiv1.HTTPRouteRule{{
+				BackendRefs: []gwapiv1.HTTPBackendRef{{
+					BackendRef: gwapiv1.BackendRef{
+						BackendObjectReference: gwapiv1.BackendObjectReference{
+							Group:     ptr.To(gwapiv1.Group("inference.networking.k8s.io")),
+							Kind:      ptr.To(gwapiv1.Kind("InferencePool")),
+							Name:      "pool-x",
+							Namespace: &hrNS,
+						},
+					},
+				}},
+			}},
+		},
+	}))
+
+	// Reconcile the pool and verify it reports the attached gateway via the HTTPRoute path.
+	_, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: "pool-x", Namespace: "ns-b"}})
+	require.NoError(t, err)
+
+	var updated gwaiev1.InferencePool
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: "pool-x", Namespace: "ns-b"}, &updated))
+	require.Len(t, updated.Status.Parents, 1, "cross-ns InferencePool should be attached via the generated HTTPRoute")
+	require.Equal(t, "gw", string(updated.Status.Parents[0].ParentRef.Name))
+	require.Equal(t, "ns-a", string(updated.Status.Parents[0].ParentRef.Namespace))
+
+	// The Gateway handler must find the cross-ns pool through the generated HTTPRoute.
+	gwReqs := c.gatewayEventHandler(ctx, &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns-a"},
+		Spec:       gwapiv1.GatewaySpec{GatewayClassName: "test-class"},
+	})
+	require.Len(t, gwReqs, 1)
+	require.Equal(t, "ns-b", gwReqs[0].Namespace)
 }
