@@ -80,6 +80,13 @@ func (s *sseEventParser) next() (*sseEvent, error) {
 			return nil, err
 		}
 		if ok {
+			if event == nil {
+				// A complete-but-empty event (comment-only heartbeat, stray blank
+				// line) was found and its separator consumed. Skip it and keep
+				// scanning the remainder for the next real event rather than
+				// surfacing a spurious event that would clobber the last event ID.
+				continue
+			}
 			return event, nil
 		}
 
@@ -104,6 +111,15 @@ func (s *sseEventParser) next() (*sseEvent, error) {
 }
 
 // parseEvent parses one normalized chunk into an sseEvent.
+//
+// It returns nil (and no error) for chunks that carry no event:, id:, or data:
+// fields — i.e. SSE comment-only heartbeats (":\n\n", the spec-recommended
+// keep-alive) and stray blank chunks produced by a trailing newline after the
+// final event separator. Surfacing these as events would clobber the stored
+// per-backend last event ID with "" and emit a bare "id: <composite>\n\n"
+// downstream, defeating SSE resume exactly when resumption matters (the
+// connection drops during an idle period after a heartbeat). This extends the
+// #2219 empty-data-line guard to events with no fields at all.
 func (s *sseEventParser) parseEvent(chunk []byte) (*sseEvent, error) {
 	ret := &sseEvent{backend: s.backend}
 
@@ -128,17 +144,34 @@ func (s *sseEventParser) parseEvent(chunk []byte) (*sseEvent, error) {
 		}
 	}
 
+	// Skip dispatch of comment-only/empty events (spec-defined heartbeats and
+	// stray blank lines). An event that produced no event:, id:, or data:
+	// content carries no information and must not be surfaced to callers —
+	// otherwise the caller would clobber the real per-backend last event ID
+	// with "" and flush a bare id line downstream.
+	if ret.event == "" && ret.id == "" && len(ret.messages) == 0 {
+		return nil, nil
+	}
 	return ret, nil
 }
 
 // extractEvent tries to find a complete event (double newline) in remainder.
+// It returns (event, true, nil) when a separator was found, where event is nil
+// for comment-only/blank chunks (the separator is still consumed) so next() can
+// keep scanning; (nil, false, nil) when no separator is present yet.
 func (s *sseEventParser) extractEvent() (*sseEvent, bool, error) {
 	// Search for double newline "\n\n"
 	if idx := bytes.Index(s.buf, sseLFLF); idx >= 0 {
 		chunk := s.buf[:idx]
 		s.buf = s.buf[idx+2:] // retain after separator
 		event, err := s.parseEvent(chunk)
-		return event, true, err
+		if err != nil {
+			return nil, false, err
+		}
+		// A nil event signals "separator consumed, but the chunk carried no
+		// event/id/data fields" (comment-only heartbeat or stray blank line).
+		// Return ok=true so next() keeps scanning the remainder without reading.
+		return event, true, nil
 	}
 	return nil, false, nil
 }
