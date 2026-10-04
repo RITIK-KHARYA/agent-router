@@ -638,6 +638,114 @@ func TestSendRequestPerBackend_GzipDecompression(t *testing.T) {
 	require.Equal(t, "ping", req.Method)
 }
 
+// TestSendRequestPerBackend_GzipHeaderMismatchOnErrorSurfacesUpstreamBody verifies
+// that when an upstream responds with a non-2xx status, a Content-Encoding: gzip
+// header, but a body that is not actually gzipped (a malformed peer), the gateway
+// surfaces the real upstream status code and body rather than masking them with a
+// gzip-decompressor error. This is a regression test for the bug where gzip.NewReader
+// failed eagerly and short-circuited the status-code switch.
+func TestSendRequestPerBackend_GzipHeaderMismatchOnErrorSurfacesUpstreamBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Header claims gzip, but the body is plain text (spec-violating peer).
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream crashed"}`))
+	}))
+	defer server.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = server.URL
+	s := &session{reqCtx: proxy}
+	ch := make(chan *backendEvent, 1)
+	err := s.sendRequestPerBackend(t.Context(), ch, "route1", filterapi.MCPBackend{Name: "backend1"}, &compositeSessionEntry{
+		sessionID: "sess1",
+	}, http.MethodGet, nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed with status code 500")
+	require.Contains(t, err.Error(), "upstream crashed")
+	require.NotContains(t, err.Error(), "failed to create gzip decompressor")
+	require.NotContains(t, err.Error(), "gzip: invalid header")
+}
+
+// TestSendRequestPerBackend_GzipHeaderMismatchOn200ParsesStream verifies that when
+// an upstream responds with HTTP 200 and a Content-Encoding: gzip header but a
+// plain-text SSE body, the gateway still parses the SSE stream and emits events
+// rather than short-circuiting with a gzip-decompressor error.
+func TestSendRequestPerBackend_GzipHeaderMismatchOn200ParsesStream(t *testing.T) {
+	id1, _ := jsonrpc.MakeID("1")
+	msg1, _ := jsonrpc.EncodeMessage(&jsonrpc.Request{Method: "ping", ID: id1})
+	sseBody := "event: message\ndata: " + string(msg1) + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Header claims gzip, but the body is plain text (spec-violating peer).
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sseBody))
+	}))
+	defer server.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = server.URL
+	s := &session{reqCtx: proxy}
+	ch := make(chan *backendEvent, 10)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	err := s.sendRequestPerBackend(ctx, ch, "route1", filterapi.MCPBackend{Name: "backend1"}, &compositeSessionEntry{
+		sessionID: "sess1",
+	}, http.MethodGet, nil, nil)
+	require.NoError(t, err)
+	close(ch)
+	var events []*backendEvent
+	for e := range ch {
+		events = append(events, e)
+	}
+	require.Len(t, events, 1, "expected 1 event from plain-text SSE body despite mismatched Content-Encoding")
+	require.Equal(t, "message", events[0].event)
+	require.Len(t, events[0].messages, 1)
+	req, ok := events[0].messages[0].(*jsonrpc.Request)
+	require.True(t, ok)
+	require.Equal(t, "ping", req.Method)
+}
+
+// TestSendRequestPerBackend_GzipHeaderMismatchOnJSON200Parses verifies that a
+// mismatched Content-Encoding: gzip header over a plain-text application/json
+// body on a 200 response is parsed as a JSON-RPC message via the json content-type path.
+func TestSendRequestPerBackend_GzipHeaderMismatchOnJSON200Parses(t *testing.T) {
+	id1, _ := jsonrpc.MakeID("1")
+	msg1, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: id1, Result: []byte(`{"ok":true}`)})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(msg1)
+	}))
+	defer server.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = server.URL
+	s := &session{reqCtx: proxy}
+	ch := make(chan *backendEvent, 10)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	err := s.sendRequestPerBackend(ctx, ch, "route1", filterapi.MCPBackend{Name: "backend1"}, &compositeSessionEntry{
+		sessionID: "sess1",
+	}, http.MethodGet, nil, nil)
+	require.NoError(t, err)
+	close(ch)
+	var events []*backendEvent
+	for e := range ch {
+		events = append(events, e)
+	}
+	require.Len(t, events, 1, "expected 1 event from plain-text JSON body despite mismatched Content-Encoding")
+	require.Equal(t, "message", events[0].event)
+	require.Len(t, events[0].messages, 1)
+	resp, ok := events[0].messages[0].(*jsonrpc.Response)
+	require.True(t, ok)
+	require.Equal(t, id1, resp.ID)
+}
+
 func TestSendRequestPerBackend_BrotliDecompression(t *testing.T) {
 	id1, _ := jsonrpc.MakeID("1")
 	msg1, _ := jsonrpc.EncodeMessage(&jsonrpc.Request{Method: "ping", ID: id1})
