@@ -627,9 +627,6 @@ func mapReasoningEffortToThinkingLevel(reasonEffort openai.ReasoningEffort, mode
 		}
 		return genai.ThinkingLevelHigh, nil
 	case openai.ReasoningEffortHigh:
-		if !isFlash {
-			return "", fmt.Errorf("%w: reasoning effort 'high' is only supported for Gemini Flash models", internalapi.ErrInvalidRequestBody)
-		}
 		return genai.ThinkingLevelHigh, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported reasoning effort level: %q (supported: none, low, medium, high)", internalapi.ErrInvalidRequestBody, reasonEffort)

@@ -457,6 +457,23 @@ func TestWithTestUpstream(t *testing.T) {
 			expResponseBody:   `{"choices":[{"finish_reason":"tool_calls","index":0,"message":{"role":"assistant","tool_calls":[{"id":"703482f8-2e5b-4dcc-a872-d74bd66c3866","function":{"arguments":"{\"order_id\":\"123\"}","name":"get_delivery_date"},"type":"function"}]}}],"created":123, "id":"EI5xaK-vOtqJm22IPmuCR14AI","model":"gemini-2.0-flash-001","object":"chat.completion","usage":{"completion_tokens":11,"completion_tokens_details":{},"prompt_tokens":50,"total_tokens":61,"prompt_tokens_details":{}}}`,
 		},
 		{
+			// reasoning_effort "high" must map to thinking_level HIGH on a Gemini 3 Pro model
+			// (regression guard: previously the gateway 422'd "high is only supported for Gemini
+			// Flash models" for non-Flash 3+ models).
+			name:              "gcp-vertexai - /v1/chat/completions - reasoning_effort high on Pro",
+			backend:           "gcp-vertexai",
+			path:              "/v1/chat/completions",
+			method:            http.MethodPost,
+			requestBody:       `{"model":"gemini-3.1-pro","reasoning_effort":"high","messages":[{"role":"user","content":"Explain RSA step by step."}]}`,
+			expRequestBody:    `{"contents":[{"parts":[{"text":"Explain RSA step by step."}],"role":"user"}],"tools":null,"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}`,
+			expPath:           "/v1/projects/gcp-project-name/locations/gcp-region/publishers/google/models/gemini-3.1-pro:generateContent",
+			expRequestHeaders: map[string]string{"Authorization": "Bearer " + fakeGCPAuthToken},
+			responseStatus:    strconv.Itoa(http.StatusOK),
+			responseBody:      `{"candidates":[{"content":{"parts":[{"text":"This is a test response from Gemini."}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":15,"candidatesTokenCount":10,"totalTokenCount":35}}`,
+			expStatus:         http.StatusOK,
+			expResponseBody:   `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"This is a test response from Gemini.","role":"assistant"}}],"model":"gemini-3.1-pro","object":"chat.completion","usage":{"completion_tokens":10,"completion_tokens_details":{},"prompt_tokens":15,"total_tokens":35,"prompt_tokens_details":{}}}`,
+		},
+		{
 			name:              "gcp-anthropicai - /v1/chat/completions",
 			backend:           "gcp-anthropicai",
 			path:              "/v1/chat/completions",
