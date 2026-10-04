@@ -43,7 +43,7 @@ func NewHandler(ctx context.Context, config *filterapi.BackendAuth) (filterapi.B
 		inner, err = newAzureHandler(config.AzureAuth)
 		applyFn = applyBearerCredential
 	case config.GCPAuth != nil:
-		inner, err = newGCPHandler(ctx, config.GCPAuth)
+		inner, err = newGCPHandler(config.GCPAuth)
 		applyFn = makeGCPApplyFn(config.GCPAuth.Region, config.GCPAuth.ProjectName)
 	case config.AnthropicAPIKey != nil:
 		inner, err = newAnthropicAPIKeyHandler(config.AnthropicAPIKey)
