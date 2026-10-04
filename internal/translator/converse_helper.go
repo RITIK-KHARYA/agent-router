@@ -24,6 +24,20 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
+// isToolChoiceNone reports whether toolChoice is the OpenAI string "none", which
+// means "the model will not call any tool". AWS Bedrock has no "none" tool choice
+// and the only way to honor it is to omit the [awsbedrock.ToolConfiguration]
+// entirely; leaving the tools in place would default to "auto" and let the model
+// call a tool. Callers must therefore suppress the ToolConfiguration when this
+// returns true.
+func isToolChoiceNone(toolChoice *openai.ChatCompletionToolChoiceUnion) bool {
+	if toolChoice == nil {
+		return false
+	}
+	tc, ok := toolChoice.Value.(string)
+	return ok && tc == string(openai.ToolChoiceTypeNone)
+}
+
 // openAIToolsToBedrockToolConfig converts openai ChatCompletion tools (and optional
 // tool_choice) into an aws bedrock tool configuration. toolChoice may be nil.
 func openAIToolsToBedrockToolConfig(tools []openai.Tool, toolChoice *openai.ChatCompletionToolChoiceUnion, model string,

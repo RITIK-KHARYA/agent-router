@@ -225,6 +225,31 @@ func TestOpenAIToolsToBedrockToolConfig(t *testing.T) {
 	}
 }
 
+func TestIsToolChoiceNone(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolChoice *openai.ChatCompletionToolChoiceUnion
+		expected   bool
+	}{
+		{name: "nil tool choice", toolChoice: nil, expected: false},
+		{name: "none string", toolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "none"}, expected: true},
+		{name: "auto string", toolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "auto"}, expected: false},
+		{name: "required string", toolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "required"}, expected: false},
+		{name: "tool name string", toolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "get_current_weather"}, expected: false},
+		{
+			name:       "named tool object with name none is not the none keyword",
+			toolChoice: &openai.ChatCompletionToolChoiceUnion{Value: openai.ChatCompletionNamedToolChoice{Type: openai.ToolTypeFunction, Function: openai.ChatCompletionNamedToolChoiceFunction{Name: "none"}}},
+			expected:   false,
+		},
+		{name: "non-string value", toolChoice: &openai.ChatCompletionToolChoiceUnion{Value: 123}, expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, isToolChoiceNone(tt.toolChoice))
+		})
+	}
+}
+
 func TestOpenAIMessageToBedrockMessageRoleUser(t *testing.T) {
 	t.Run("string content", func(t *testing.T) {
 		msg, err := openAIMessageToBedrockMessageRoleUser(&openai.ChatCompletionUserMessageParam{
