@@ -644,6 +644,7 @@ type openAIStreamToAnthropicState struct {
 	messageStarted   bool // flag indicating emitted message_start
 	hasOpenBlock     bool // flag indicating emitted content_block_start but not content_block_stop
 	hasThinkingBlock bool // flag indicating the open block is a thinking block
+	hasTextBlock     bool // flag indicating the open block is a text block
 	closingEmitted   bool // flag indicating emitted content_block_stop + message_delta + message_stop
 	messageID        string
 	model            string
@@ -785,13 +786,21 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 
 		// Handle text content.
 		if delta.Content != nil && *delta.Content != "" {
-			// Close any open thinking block before starting a text block.
-			if s.hasThinkingBlock {
-				if err := s.closeThinkingBlock(out); err != nil {
+			// Close any open non-text block (e.g., thinking or tool_use) before starting a
+			// text block. A text_delta must always target a text content block; emitting it
+			// against a tool_use or thinking block violates the Anthropic streaming protocol
+			// (a tool_use block only receives input_json_delta) and causes clients to
+			// silently drop the text. An already-open text block is reused so consecutive
+			// text deltas accumulate on the same block.
+			if s.hasOpenBlock && !s.hasTextBlock {
+				if err := s.emitContentBlockStop(out); err != nil {
 					return err
 				}
+				s.hasOpenBlock = false
+				s.hasThinkingBlock = false
+				s.blockIndex++
 			}
-			// Emit textblockstart if not started
+			// Open a text block if none is open.
 			if !s.hasOpenBlock {
 				if err := s.emitTextBlockStart(out); err != nil {
 					return err
@@ -846,6 +855,7 @@ func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 // emitTextBlockStart emits a content_block_start SSE event for a text content block.
 func (s *openAIStreamToAnthropicState) emitTextBlockStart(out *[]byte) error {
 	s.hasOpenBlock = true
+	s.hasTextBlock = true
 	payload := sseContentBlockStartText{
 		Type:         "content_block_start",
 		Index:        s.blockIndex,
@@ -891,6 +901,7 @@ func (s *openAIStreamToAnthropicState) handleReasoningDelta(rc *openai.StreamRea
 			return err
 		}
 		s.hasOpenBlock = false
+		s.hasTextBlock = false
 		s.blockIndex++
 	}
 	// Ensure the thinking block is open before emitting any delta.
@@ -918,6 +929,7 @@ func (s *openAIStreamToAnthropicState) handleReasoningDelta(rc *openai.StreamRea
 func (s *openAIStreamToAnthropicState) emitThinkingBlockStart(out *[]byte) error {
 	s.hasOpenBlock = true
 	s.hasThinkingBlock = true
+	s.hasTextBlock = false
 	payload := sseContentBlockStartThinking{
 		Type:         "content_block_start",
 		Index:        s.blockIndex,
@@ -961,17 +973,6 @@ func (s *openAIStreamToAnthropicState) emitSignatureDelta(signature string, out 
 	return nil
 }
 
-// closeThinkingBlock closes an open thinking block by emitting content_block_stop and advancing the block index.
-func (s *openAIStreamToAnthropicState) closeThinkingBlock(out *[]byte) error {
-	if err := s.emitContentBlockStop(out); err != nil {
-		return err
-	}
-	s.hasOpenBlock = false
-	s.hasThinkingBlock = false
-	s.blockIndex++
-	return nil
-}
-
 // handleToolCallDelta handles an OpenAI tool call delta and emits Anthropic tool_use content block events.
 func (s *openAIStreamToAnthropicState) handleToolCallDelta(tc *openai.ChatCompletionChunkChoiceDeltaToolCall, out *[]byte) error {
 	tool, exists := s.activeTools[tc.Index]
@@ -982,6 +983,7 @@ func (s *openAIStreamToAnthropicState) handleToolCallDelta(tc *openai.ChatComple
 				return err
 			}
 			s.hasThinkingBlock = false
+			s.hasTextBlock = false
 			s.blockIndex++
 		}
 
@@ -996,6 +998,7 @@ func (s *openAIStreamToAnthropicState) handleToolCallDelta(tc *openai.ChatComple
 		}
 		s.activeTools[tc.Index] = tool
 		s.hasOpenBlock = true
+		s.hasTextBlock = false
 
 		// Emit content_block_start for the new tool_use block.
 		payload := sseContentBlockStartTool{
@@ -1056,6 +1059,7 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 			return err
 		}
 		s.hasOpenBlock = false
+		s.hasTextBlock = false
 	}
 
 	stopReason := s.stopReason

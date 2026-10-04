@@ -733,6 +733,149 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallStreaming(t *testing
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
 }
 
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallThenText(t *testing.T) {
+	// Regression test: a text delta arriving after a tool_call delta has opened a
+	// tool_use block must close the tool_use block and open a new text block,
+	// rather than emitting a text_delta bound to the tool_use block's index.
+	// On the buggy code the text_delta targets index 0 (the tool_use block),
+	// violating the Anthropic streaming protocol and causing the official Anthropic
+	// SDK accumulator to silently drop the text.
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "claude-3",
+	}
+
+	// OpenAI stream: tool_call start -> text content AFTER the tool block is open ->
+	// finish -> usage -> [DONE].
+	input := "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-xyz\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"loc\\\":\\\"SF\\\"}\"},\"type\":\"function\"}]}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello after tool\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":10}}\n\n" +
+		"data: [DONE]\n\n"
+
+	state.buffer.WriteString(input)
+
+	var out []byte
+	require.NoError(t, state.processBuffer(&out, true))
+
+	events := parseSSEEventsFromBytes(out)
+
+	// Expected event shape, in order:
+	//   content_block_start  index 0  tool_use
+	//   content_block_stop   index 0                       <- close tool block
+	//   content_block_start  index 1  text                  <- open NEW text block
+	//   content_block_delta  index 1  text_delta "hello after tool"
+	//   content_block_stop   index 1
+	//   message_delta ... / message_stop
+
+	// Assert the text_delta is bound to index 1 (a text block), NOT index 0 (the tool_use block).
+	var tdIndex *int
+	for _, e := range events {
+		var m map[string]any
+		_ = json.Unmarshal([]byte(e.data), &m)
+		if m["type"] == "content_block_delta" {
+			delta, ok := m["delta"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if delta["type"] == "text_delta" {
+				idx := int(m["index"].(float64))
+				tdIndex = &idx
+			}
+		}
+	}
+	require.NotNil(t, tdIndex, "expected a text_delta event")
+	assert.Equal(t, 1, *tdIndex, "text_delta must target a newly-opened text block (index 1), not the tool_use block (index 0)")
+
+	// Verify the full expected block sequence: tool_use(0) -> stop(0) -> text(1) -> text_delta(1) -> stop(1).
+	var blockStartTypes []string
+	var blockStopIndices []int
+	for _, e := range events {
+		var m map[string]any
+		_ = json.Unmarshal([]byte(e.data), &m)
+		switch m["type"] {
+		case "content_block_start":
+			cb, ok := m["content_block"].(map[string]any)
+			if !ok {
+				continue
+			}
+			blockStartTypes = append(blockStartTypes, cb["type"].(string))
+		case "content_block_stop":
+			blockStopIndices = append(blockStopIndices, int(m["index"].(float64)))
+		}
+	}
+	assert.Equal(t, []string{"tool_use", "text"}, blockStartTypes, "expected a tool_use block then a new text block")
+	assert.Equal(t, []int{0, 1}, blockStopIndices, "expected both the tool and text blocks to be stopped")
+
+	// End-to-end: feed the emitted SSE through the official Anthropic SDK accumulator and
+	// confirm the post-tool text is preserved in the assembled message.
+	msg := accumulateAnthropicMessage(t, out)
+	var textContent string
+	for _, block := range msg.Content {
+		if block.Text != "" {
+			textContent = block.Text
+		}
+	}
+	assert.Equal(t, "hello after tool", textContent, "post-tool text must survive SDK accumulation")
+}
+
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallThenTextThenText(t *testing.T) {
+	// Guards against an over-aggressive fix that closes the open text block on every
+	// text delta: consecutive text deltas after a tool_call must accumulate on the SAME
+	// text block (index 1), producing exactly one content_block_start(text) and one
+	// content_block_stop for that block.
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "claude-3",
+	}
+
+	input := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"},\"type\":\"function\"}]}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"part1\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" part2\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":5}}\n\n" +
+		"data: [DONE]\n\n"
+
+	state.buffer.WriteString(input)
+	var out []byte
+	require.NoError(t, state.processBuffer(&out, true))
+	events := parseSSEEventsFromBytes(out)
+
+	var textStarts, textStops, textDeltas int
+	for _, e := range events {
+		var m map[string]any
+		_ = json.Unmarshal([]byte(e.data), &m)
+		switch m["type"] {
+		case "content_block_start":
+			if cb, ok := m["content_block"].(map[string]any); ok && cb["type"] == "text" {
+				textStarts++
+			}
+		case "content_block_stop":
+			if int(m["index"].(float64)) == 1 {
+				textStops++
+			}
+		case "content_block_delta":
+			if d, ok := m["delta"].(map[string]any); ok && d["type"] == "text_delta" {
+				assert.Equal(t, 1, int(m["index"].(float64)), "consecutive text deltas must stay on index 1")
+				textDeltas++
+			}
+		}
+	}
+	assert.Equal(t, 1, textStarts, "exactly one text content_block_start")
+	assert.Equal(t, 2, textDeltas, "both text deltas emitted")
+	assert.Equal(t, 1, textStops, "exactly one content_block_stop for the text block")
+
+	// End-to-end: both text fragments must be concatenated and preserved.
+	msg := accumulateAnthropicMessage(t, out)
+	var textContent string
+	for _, block := range msg.Content {
+		if block.Text != "" {
+			textContent = block.Text
+		}
+	}
+	assert.Equal(t, "part1 part2", textContent, "consecutive text deltas must accumulate into one text block")
+}
+
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_EndOfStreamClosing(t *testing.T) {
 	// Verify endOfStream triggers closing events when no usage chunk is present.
 	state := &openAIStreamToAnthropicState{
