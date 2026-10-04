@@ -110,6 +110,41 @@ func TestAppendAzureOpenAIAPIVersion(t *testing.T) {
 	require.Equal(t, "/custom/path?foo=bar&api-version=some-version", appendAzureOpenAIAPIVersion("/custom/path?foo=bar&", "some-version"))
 }
 
+// TestOpenAIToAzureOpenAITranslator_EmptyAPIVersion verifies that every Azure OpenAI
+// translator fails fast when constructed without an api-version (the configuration that
+// endpointspec.GetTranslator produces for a version-less AzureOpenAI backend), rather
+// than silently emitting a malformed "?api-version=" query parameter that Azure rejects
+// at runtime.
+func TestOpenAIToAzureOpenAITranslator_EmptyAPIVersion(t *testing.T) {
+	t.Run("chat_completion", func(t *testing.T) {
+		// Constructed exactly as endpointspec.GetTranslator does for a version-less Azure backend.
+		o := NewChatCompletionOpenAIToAzureOpenAITranslator("", "")
+		hm, bm, err := o.RequestBody(nil, &openai.ChatCompletionRequest{Model: "gpt-4"}, false)
+		require.ErrorIs(t, err, errAzureOpenAIAPIVersionRequired)
+		require.ErrorContains(t, err, "api version")
+		require.Nil(t, hm)
+		require.Nil(t, bm)
+	})
+	t.Run("responses", func(t *testing.T) {
+		o := NewResponsesOpenAIToAzureOpenAITranslator("", "")
+		hm, bm, err := o.RequestBody([]byte(`{"model":"gpt-4","input":"Hi"}`), &openai.ResponseRequest{Model: "gpt-4"}, false)
+		require.ErrorIs(t, err, errAzureOpenAIAPIVersionRequired)
+		require.ErrorContains(t, err, "api version")
+		require.Nil(t, hm)
+		require.Nil(t, bm)
+	})
+	t.Run("embeddings", func(t *testing.T) {
+		o := NewEmbeddingOpenAIToAzureOpenAITranslator("", "")
+		hm, bm, err := o.RequestBody([]byte(`{"model":"text-embedding-3-small","input":"hi"}`), &openai.EmbeddingRequest{
+			EmbeddingBaseRequest: openai.EmbeddingBaseRequest{Model: "text-embedding-3-small"},
+		}, false)
+		require.ErrorIs(t, err, errAzureOpenAIAPIVersionRequired)
+		require.ErrorContains(t, err, "api version")
+		require.Nil(t, hm)
+		require.Nil(t, bm)
+	})
+}
+
 // TestResponseModel_AzureOpenAI tests that Azure OpenAI returns the actual model version from response
 // Azure ignores the model field in the request and uses URI-based resolution
 func TestResponseModel_AzureOpenAI(t *testing.T) {

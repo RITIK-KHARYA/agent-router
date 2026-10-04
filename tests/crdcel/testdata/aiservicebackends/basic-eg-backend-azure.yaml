@@ -11,6 +11,7 @@ metadata:
 spec:
   schema:
     name: AzureOpenAI
+    version: 2025-01-01-preview
   backendRef:
     name: eg-backend
     kind: Backend
