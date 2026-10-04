@@ -1443,6 +1443,26 @@ func TestGetBSPGeneratedSecretName(t *testing.T) {
 			expectedName: "ai-eg-bsp-azure-oidc-bsp",
 		},
 		{
+			// Regression: the Azure ClientSecretRef path creates a generated secret via
+			// NewAzureTokenRotator, so getBSPGeneratedSecretName must return the generated
+			// name (previously it returned "" because it only checked OIDCExchangeToken).
+			name: "Azure with ClientSecretRef (no OIDC)",
+			bsp: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "azure-cs-bsp",
+				},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeAzureCredentials,
+					AzureCredentials: &aigv1b1.BackendSecurityPolicyAzureCredentials{
+						ClientSecretRef: &gwapiv1.SecretObjectReference{
+							Name: "azure-client-secret",
+						},
+					},
+				},
+			},
+			expectedName: "ai-eg-bsp-azure-cs-bsp",
+		},
+		{
 			name: "GCP type",
 			bsp: &aigv1b1.BackendSecurityPolicy{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1460,6 +1480,31 @@ func TestGetBSPGeneratedSecretName(t *testing.T) {
 			expectedName: "",
 		},
 		{
+			// The GCP WorkloadIdentityFederationConfig (OIDC) path creates a generated secret
+			// via NewGCPOIDCTokenRotator, so the helper must return the generated name.
+			name: "GCP with WorkloadIdentityFederationConfig",
+			bsp: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gcp-wif-bsp",
+				},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeGCPCredentials,
+					GCPCredentials: &aigv1b1.BackendSecurityPolicyGCPCredentials{
+						WorkloadIdentityFederationConfig: &aigv1b1.GCPWorkloadIdentityFederationConfig{
+							ProjectID:                    "test-project-id",
+							WorkloadIdentityPoolName:     "test-pool",
+							WorkloadIdentityProviderName: "test-provider",
+						},
+					},
+				},
+			},
+			expectedName: "ai-eg-bsp-gcp-wif-bsp",
+		},
+		{
+			// Regression: the GCP CredentialsFile path (with SecretRef set) creates a generated
+			// secret via NewGCPTokenRotator, so getBSPGeneratedSecretName must return the
+			// generated name (previously it returned "" because it only checked
+			// WorkloadIdentityFederationConfig).
 			name: "GCP with service account credential file",
 			bsp: &aigv1b1.BackendSecurityPolicy{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1473,6 +1518,25 @@ func TestGetBSPGeneratedSecretName(t *testing.T) {
 								Name: "gcp-bsp-sa-json-key-file",
 							},
 						},
+					},
+				},
+			},
+			expectedName: "ai-eg-bsp-gcp-bsp-sa",
+		},
+		{
+			// The GCP ADC path (neither CredentialsFile nor WorkloadIdentityFederationConfig)
+			// early-returns in rotateCredential before any rotator is built, so no generated
+			// secret is created and the helper must return "".
+			name: "GCP ADC (no CredentialsFile or WorkloadIdentityFederationConfig)",
+			bsp: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gcp-adc-bsp",
+				},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeGCPCredentials,
+					GCPCredentials: &aigv1b1.BackendSecurityPolicyGCPCredentials{
+						ProjectName: "test-project",
+						Region:      "us-central1",
 					},
 				},
 			},
@@ -1490,14 +1554,36 @@ func TestGetBSPGeneratedSecretName(t *testing.T) {
 			},
 			expectedName: "",
 		},
+		{
+			name: "AzureAPIKey type",
+			bsp: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "azure-apikey-bsp",
+				},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeAzureAPIKey,
+				},
+			},
+			expectedName: "",
+		},
+		{
+			name: "AnthropicAPIKey type",
+			bsp: &aigv1b1.BackendSecurityPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "anthropic-apikey-bsp",
+				},
+				Spec: aigv1b1.BackendSecurityPolicySpec{
+					Type: aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey,
+				},
+			},
+			expectedName: "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resultName := getBSPGeneratedSecretName(tt.bsp)
-			if resultName != "" {
-				require.Equal(t, tt.expectedName, resultName)
-			}
+			require.Equal(t, tt.expectedName, resultName)
 		})
 	}
 }
