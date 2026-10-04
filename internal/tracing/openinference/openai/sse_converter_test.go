@@ -146,6 +146,39 @@ data: [DONE]
 `,
 			expected: `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Hi","role":"assistant"}}],"created":0,"model":"gpt-first","object":"chat.completion.chunk","usage":{"completion_tokens":1,"prompt_tokens":5,"total_tokens":6}}`,
 		},
+		{
+			// Tool calls arrive split across chunks: the first delta
+			// carries the id/type/function.name, subsequent deltas carry
+			// function.arguments fragments, and a trailing delta carries
+			// the finish_reason. The synthesized message must reassemble
+			// the full tool call so streaming traces match non-streaming.
+			name: "tool calls split across chunks",
+			input: `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5-nano","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather"}}]}}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5-nano","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":\"NYC\"}"}}]}}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5-nano","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+`,
+			expected: `{"id":"chatcmpl-1","choices":[{"finish_reason":"tool_calls","index":0,"message":{"content":"","role":"assistant","tool_calls":[{"id":"call_abc","function":{"arguments":"{\"location\":\"NYC\"}","name":"get_weather"},"type":"function"}]}}],"model":"gpt-5-nano","object":"chat.completion.chunk"}`,
+		},
+		{
+			// Multiple tool calls interleave across chunks, and a later
+			// chunk reorders the calls relative to their indices. Keying
+			// the merge on call.Index (not chunk position) attributes each
+			// arguments fragment to the originating call.
+			name: "multiple tool calls interleaved and reordered",
+			input: `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5-nano","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}},{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"tz\":"}}]}}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5-nano","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"UTC\"}"}}]}}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5-nano","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":""}},{"index":0,"function":{"arguments":"\"Berlin\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+`,
+			expected: `{"id":"chatcmpl-1","choices":[{"finish_reason":"tool_calls","index":0,"message":{"content":"","role":"assistant","tool_calls":[{"id":"call_weather","function":{"arguments":"{\"city\":\"Berlin\"}","name":"get_weather"},"type":"function"},{"id":"call_time","function":{"arguments":"{\"tz\":\"UTC\"}","name":"get_time"},"type":"function"}]}}],"model":"gpt-5-nano","object":"chat.completion.chunk"}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -168,4 +201,70 @@ data: [DONE]
 			}
 		})
 	}
+}
+
+// TestConvertSSEToJSON_ToolCallFirstNonEmptyWins pins that the first non-empty
+// id, type, and function.name are retained while later empty values do not
+// clear them. Some providers send the id and the function name in separate
+// chunks.
+func TestConvertSSEToJSON_ToolCallFirstNonEmptyWins(t *testing.T) {
+	emptyID := ""
+	chunks := []*openai.ChatCompletionResponseChunk{
+		{ID: "chatcmpl-1", Model: "gpt-5-nano", Choices: []openai.ChatCompletionResponseChunkChoice{{
+			Index: 0,
+			Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
+				Role: "assistant",
+				ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{{
+					Index: 0, ID: ptr("call_x"), Type: openai.ChatCompletionMessageToolCallTypeFunction,
+				}},
+			},
+		}}},
+		// A later empty id must not overwrite the retained one.
+		{ID: "chatcmpl-1", Model: "gpt-5-nano", Choices: []openai.ChatCompletionResponseChunkChoice{{
+			Index: 0,
+			Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
+				ToolCalls: []openai.ChatCompletionChunkChoiceDeltaToolCall{{
+					Index:    0,
+					ID:       &emptyID,
+					Function: openai.ChatCompletionMessageToolCallFunctionParam{Name: "get_weather", Arguments: `{"a":1}`},
+				}},
+			},
+		}}},
+	}
+
+	resp := convertSSEToJSON(chunks)
+	msg := resp.Choices[0].Message
+	require.Len(t, msg.ToolCalls, 1)
+	require.NotNil(t, msg.ToolCalls[0].ID)
+	require.Equal(t, "call_x", *msg.ToolCalls[0].ID)
+	require.Equal(t, openai.ChatCompletionMessageToolCallTypeFunction, msg.ToolCalls[0].Type)
+	require.Equal(t, "get_weather", msg.ToolCalls[0].Function.Name)
+	require.JSONEq(t, `{"a":1}`, msg.ToolCalls[0].Function.Arguments)
+}
+
+// TestConvertSSEToJSON_NoToolCalls pins that responses without tool call
+// deltas do not synthesize an empty tool_calls array: the converter must leave
+// Message.ToolCalls nil so the serialized output matches the prior behavior.
+func TestConvertSSEToJSON_NoToolCalls(t *testing.T) {
+	chunks := []*openai.ChatCompletionResponseChunk{
+		{ID: "chatcmpl-1", Model: "gpt-5-nano", Choices: []openai.ChatCompletionResponseChunkChoice{{
+			Index: 0,
+			Delta: &openai.ChatCompletionResponseChunkChoiceDelta{
+				Role:    "assistant",
+				Content: ptr("Hello!"),
+			},
+		}}},
+		{ID: "chatcmpl-1", Model: "gpt-5-nano", Choices: []openai.ChatCompletionResponseChunkChoice{{
+			Index:        0,
+			Delta:        &openai.ChatCompletionResponseChunkChoiceDelta{},
+			FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
+		}}},
+	}
+
+	resp := convertSSEToJSON(chunks)
+	require.Nil(t, resp.Choices[0].Message.ToolCalls)
+
+	b, err := json.Marshal(resp)
+	require.NoError(t, err)
+	require.NotContains(t, string(b), "tool_calls")
 }
