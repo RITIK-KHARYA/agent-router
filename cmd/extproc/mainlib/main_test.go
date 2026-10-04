@@ -11,9 +11,11 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
+	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
 )
 
 func Test_newLogHandler(t *testing.T) {
@@ -383,5 +386,252 @@ backends:
 		t.Fatal("timeout waiting for startup message")
 	case err := <-errCh:
 		require.NoError(t, err, "extproc exited with error before startup message")
+	}
+}
+
+// readyWriter closes readyCh the first time it observes the extproc startup
+// marker and discards all output. It avoids the io.Pipe + scanner goroutine used
+// elsewhere so there is no reader goroutine to leak or drain.
+type readyWriter struct {
+	readyCh  chan struct{}
+	once     sync.Once
+	captureM sync.Mutex
+	captured []byte
+}
+
+func (w *readyWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("AI Gateway External Processor is ready")) {
+		w.once.Do(func() { close(w.readyCh) })
+	}
+	w.captureM.Lock()
+	w.captured = append(w.captured, p...)
+	w.captureM.Unlock()
+	return len(p), nil
+}
+
+// capturedLines returns a snapshot of everything written so far.
+func (w *readyWriter) capturedLines() []byte {
+	w.captureM.Lock()
+	defer w.captureM.Unlock()
+	out := make([]byte, len(w.captured))
+	copy(out, w.captured)
+	return out
+}
+
+// TestMain_WaitsForShutdownFlush verifies that Main blocks until the shutdown
+// goroutine finishes flushing the tracing/metrics exporters and draining the
+// admin/MCP HTTP servers. Before the fix, Main returned the instant s.Serve
+// returned (right as GracefulStop completed), so the process could exit and
+// kill the detached shutdown goroutine mid-flush, dropping any buffered
+// OTLP/console spans and metrics accumulated since the last periodic export.
+//
+// The test holds a connection to the MCP server open with a partial HTTP
+// request, so the last step of the shutdown goroutine (mcpServer.Shutdown)
+// blocks until the connection is released. If Main is synchronized on
+// shutdownDone it must remain blocked; if not (the bug) it returns within a
+// few ms of cancel(), before the goroutine reaches mcpServer.Shutdown.
+func TestMain_WaitsForShutdownFlush(t *testing.T) {
+	internaltesting.ClearTestEnv(t)
+
+	// Build a minimal config bundle on disk.
+	tmpDir := t.TempDir()
+	configRaw := []byte(`
+version: dev
+backends:
+- name: openai
+  schema:
+    name: OpenAI
+    version: v1
+`)
+	configBundlePath := filepath.Join(tmpDir, "config-bundle")
+	part := filterapi.ConfigBundlePart{Name: "config", Path: filterapi.ConfigBundlePartPath(0), SizeBytes: len(configRaw)}
+	partPath := filepath.Join(configBundlePath, filepath.FromSlash(part.Path))
+	require.NoError(t, os.MkdirAll(filepath.Dir(partPath), 0o700))
+	require.NoError(t, os.WriteFile(partPath, configRaw, 0o600))
+	indexRaw, err := filterapi.MarshalConfigBundleIndex(&filterapi.ConfigBundleIndex{
+		Checksum: filterapi.ConfigBundleChecksum(configRaw),
+		Parts:    []filterapi.ConfigBundlePart{part},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(configBundlePath, filterapi.ConfigBundleIndexFileName), indexRaw, 0o600))
+
+	// Long UNIX socket paths fail on some platforms, so use /tmp/<uuid> as in
+	// TestExtProcStartupMessage.
+	socketTempDir := "/tmp/" + uuid.NewString()
+	t.Cleanup(func() { _ = os.RemoveAll(socketTempDir) })
+	require.NoError(t, os.MkdirAll(socketTempDir, 0o700))
+	mcpSocketPath := filepath.Join(socketTempDir, "mcp.sock")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	stderr := &readyWriter{readyCh: make(chan struct{})}
+
+	errCh := make(chan error, 1)
+	go func() {
+		args := []string{
+			"-configBundlePath", configBundlePath,
+			"-extProcAddr", ":0",
+			"-adminPort", "0",
+			"-mcpAddr", "unix://" + mcpSocketPath,
+			"-logLevel", "info",
+		}
+		errCh <- Main(ctx, args, stderr)
+	}()
+
+	select {
+	case <-stderr.readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for extproc startup message")
+	}
+
+	// Hold a connection to the MCP server open with a partial HTTP/1.1 request
+	// (no terminating blank line). The server blocks reading headers, keeping the
+	// connection in its active set, so mcpServer.Shutdown — the last step of the
+	// shutdown goroutine — blocks until we release it. That keeps shutdownDone
+	// from closing: a correctly synchronized Main must block, the buggy one does
+	// not.
+	mcpHold, err := net.DialTimeout("unix", mcpSocketPath, 2*time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mcpHold.Close() })
+	_, err = mcpHold.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n"))
+	require.NoError(t, err)
+
+	// Give the http.Server's accept loop time to register the held connection in
+	// its active set before shutdown begins; otherwise Shutdown may not see it
+	// and complete immediately, making the test flaky under -race.
+	time.Sleep(100 * time.Millisecond)
+
+	// Trigger graceful shutdown, mirroring a SIGTERM handler.
+	cancel()
+
+	// With the fix, Main is blocked on <-shutdownDone while the goroutine is
+	// parked in mcpServer.Shutdown waiting on mcpHold. With the bug, Main has
+	// already returned (right as GracefulStop completed, before the trailing
+	// flush/drain work even started).
+	select {
+	case err := <-errCh:
+		t.Fatalf("Main returned before shutdown flush/drain completed (synchronization missing): %v", err)
+	case <-time.After(500 * time.Millisecond):
+		// Expected: Main is still blocked, proving it waits for shutdown.
+	}
+
+	// Release the held MCP connection so mcpServer.Shutdown can finish; the rest
+	// of the shutdown goroutine then completes and shutdownDone closes, letting
+	// Main return.
+	_ = mcpHold.Close()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for Main to return after releasing the MCP hold")
+	}
+}
+
+// TestMain_WaitsForAdminDrain isolates G4 (admin HTTP server drain) by running
+// without -mcpAddr (so mcpServer is nil) and holding a connection to the admin
+// server with a partial HTTP request. The shutdown goroutine runs
+// adminServer.Shutdown as its second step, so a correctly synchronized Main
+// blocks until the held admin connection is released. The admin port is
+// discovered by parsing the "starting admin server" slog line from stderr.
+//
+// This also doubles as a regression guard for G7 (graceful shutdown returns
+// nil): the received err is asserted to be nil.
+func TestMain_WaitsForAdminDrain(t *testing.T) {
+	internaltesting.ClearTestEnv(t)
+
+	tmpDir := t.TempDir()
+	configRaw := []byte(`
+version: dev
+backends:
+- name: openai
+  schema:
+    name: OpenAI
+    version: v1
+`)
+	configBundlePath := filepath.Join(tmpDir, "config-bundle")
+	part := filterapi.ConfigBundlePart{Name: "config", Path: filterapi.ConfigBundlePartPath(0), SizeBytes: len(configRaw)}
+	partPath := filepath.Join(configBundlePath, filepath.FromSlash(part.Path))
+	require.NoError(t, os.MkdirAll(filepath.Dir(partPath), 0o700))
+	require.NoError(t, os.WriteFile(partPath, configRaw, 0o600))
+	indexRaw, err := filterapi.MarshalConfigBundleIndex(&filterapi.ConfigBundleIndex{
+		Checksum: filterapi.ConfigBundleChecksum(configRaw),
+		Parts:    []filterapi.ConfigBundlePart{part},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(configBundlePath, filterapi.ConfigBundleIndexFileName), indexRaw, 0o600))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	stderr := &readyWriter{readyCh: make(chan struct{})}
+
+	errCh := make(chan error, 1)
+	go func() {
+		// No -mcpAddr: mcpServer is nil, so adminServer.Shutdown is the latest
+		// controllable step the shutdown goroutine blocks on.
+		args := []string{
+			"-configBundlePath", configBundlePath,
+			"-extProcAddr", ":0",
+			"-adminPort", "0",
+			"-logLevel", "info",
+		}
+		errCh <- Main(ctx, args, stderr)
+	}()
+
+	select {
+	case <-stderr.readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for extproc startup message")
+	}
+
+	// Discover the admin port from the "starting admin server" slog line:
+	//   msg="starting admin server" address=127.0.0.1:PORT
+	adminAddr := func() string {
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+			for _, line := range bytes.Split(stderr.capturedLines(), []byte("\n")) {
+				if bytes.Contains(line, []byte("starting admin server")) {
+					if idx := bytes.Index(line, []byte("address=")); idx >= 0 {
+						return string(bytes.TrimSpace(line[idx+len("address="):]))
+					}
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatal("could not find admin server address in stderr")
+		return ""
+	}()
+	require.NotEmpty(t, adminAddr)
+
+	// Hold a connection to the admin server with a partial HTTP/1.1 request so
+	// adminServer.Shutdown blocks until we release it.
+	adminHold, err := net.DialTimeout("tcp", adminAddr, 2*time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = adminHold.Close() })
+	_, err = adminHold.Write([]byte("GET /metrics HTTP/1.1\r\nHost: localhost\r\n"))
+	require.NoError(t, err)
+
+	// Give the http.Server's accept loop time to register the held connection in
+	// its active set before shutdown begins; otherwise Shutdown may not see it
+	// and complete immediately, making the test flaky under -race.
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("Main returned before admin server drain completed (synchronization missing): %v", err)
+	case <-time.After(500 * time.Millisecond):
+		// Expected: Main is still blocked on adminServer.Shutdown.
+	}
+
+	_ = adminHold.Close()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err, "graceful shutdown must return nil (G7)")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for Main to return after releasing the admin hold")
 	}
 }
