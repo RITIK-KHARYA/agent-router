@@ -232,6 +232,41 @@ func (o *openAIToAWSAnthropicTranslatorV1ChatCompletion) extractAnthropicSSEFrom
 			return result
 		}
 
+		// AWS Bedrock delivers mid-stream service failures (e.g. throttlingException,
+		// modelTimeoutException) as EventStream messages whose headers carry
+		// :message-type = exception and :exception-type = <name>, with a payload of
+		// {"message":"..."} that does NOT use the {"bytes":...} envelope used by chunk
+		// frames. Translate these into an Anthropic-shaped SSE "error" event so the
+		// downstream streamParser surfaces the upstream failure to the client instead
+		// of silently discarding the frame and terminating the stream with [DONE].
+		if messageType := msg.Headers.Get(":message-type"); messageType != nil && messageType.String() == "exception" {
+			exceptionType := "unknown"
+			if h := msg.Headers.Get(":exception-type"); h != nil {
+				exceptionType = h.String()
+			}
+			// Bedrock exception payload is {"message":"..."}; extract the message,
+			// falling back to the raw payload if the field is absent.
+			exceptionMessage := gjson.GetBytes(msg.Payload, "message").String()
+			if exceptionMessage == "" {
+				exceptionMessage = string(msg.Payload)
+			}
+			errorEvent := map[string]any{
+				"type": "error",
+				"error": map[string]string{
+					"type":    exceptionType,
+					"message": exceptionMessage,
+				},
+			}
+			eventBytes, marshalErr := json.Marshal(errorEvent)
+			if marshalErr != nil {
+				lastRead = r.Size() - int64(r.Len())
+				continue
+			}
+			result = append(result, []byte(fmt.Sprintf("event: error\ndata: %s\n\n", eventBytes))...)
+			lastRead = r.Size() - int64(r.Len())
+			continue
+		}
+
 		// AWS Bedrock payload format: {"bytes":"base64-encoded-json","p":"..."}
 		var payload struct {
 			Bytes string `json:"bytes"` // base64-encoded Anthropic event JSON
