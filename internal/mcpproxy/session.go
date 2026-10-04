@@ -166,10 +166,12 @@ func (s *session) lastEventID() string {
 }
 
 var (
-	envoyAIGatewayServerToClientPingRequestIDPrefix         = "aigw-server-to-client-ping"
-	envoyAIGatewayServerToClientToolsChangedRequestIDPrefix = "aigw-server-to-client-tools-changed"
-	pingParam, _                                            = json.Marshal(&mcpsdk.PingParams{})
-	toolsChangedParam, _                                    = json.Marshal(&mcpsdk.ToolListChangedParams{})
+	envoyAIGatewayServerToClientPingRequestIDPrefix           = "aigw-server-to-client-ping"
+	envoyAIGatewayServerToClientToolsChangedRequestIDPrefix   = "aigw-server-to-client-tools-changed"
+	envoyAIGatewayServerToClientPromptsChangedRequestIDPrefix = "aigw-server-to-client-prompts-changed"
+	pingParam, _                                              = json.Marshal(&mcpsdk.PingParams{})
+	toolsChangedParam, _                                      = json.Marshal(&mcpsdk.ToolListChangedParams{})
+	promptsChangedParam, _                                    = json.Marshal(&mcpsdk.PromptListChangedParams{})
 )
 
 func newHeartBeatPingMessage() *jsonrpc.Request {
@@ -191,8 +193,17 @@ func newToolListChangedMessage() *jsonrpc.Request {
 	}
 }
 
+func newPromptListChangedMessage() *jsonrpc.Request {
+	id, _ := jsonrpc.MakeID(envoyAIGatewayServerToClientPromptsChangedRequestIDPrefix + uuid.NewString())
+	return &jsonrpc.Request{
+		ID:     id,
+		Method: "notifications/prompts/list_changed",
+		Params: promptsChangedParam,
+	}
+}
+
 // streamNotifications streams notifications from all backends in this session to the given writer.
-func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter, toolChangeSignaler changeSignaler) error {
+func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter, toolChangeSignaler, promptChangeSignaler changeSignaler) error {
 	backendMsgs := s.sendToAllBackends(ctx, http.MethodGet, nil, nil, nil)
 
 	// Create a ticker for periodic heartbeat events to avoid HTTP timeouts.
@@ -258,6 +269,19 @@ func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter
 		case <-toolChangeSignaler.Watch():
 			toolChangeEvent := &sseEvent{event: "message", messages: []jsonrpc.Message{newToolListChangedMessage()}}
 			toolChangeEvent.writeAndMaybeFlush(w)
+			// Reset the heartbeat ticker so that the next heartbeat will be sent after the full interval.
+			// This avoids sending heartbeats too frequently when there are events.
+			if heartbeatTicker != nil {
+				heartbeatTicker.Reset(heartbeatInterval)
+			}
+		// promptChangeSignaler will trigger when the prompt configuration (promptSelectors or
+		// neverModePromptIndex) configured in the MCP routes changes, mirroring toolChangeSignaler
+		// for notifications/prompts/list_changed. This is the gateway-authored path for config-only
+		// prompt filtering changes; upstream-backend-authored notifications/prompts/list_changed are
+		// forwarded verbatim by the backendMsgs case above.
+		case <-promptChangeSignaler.Watch():
+			promptChangeEvent := &sseEvent{event: "message", messages: []jsonrpc.Message{newPromptListChangedMessage()}}
+			promptChangeEvent.writeAndMaybeFlush(w)
 			// Reset the heartbeat ticker so that the next heartbeat will be sent after the full interval.
 			// This avoids sending heartbeats too frequently when there are events.
 			if heartbeatTicker != nil {

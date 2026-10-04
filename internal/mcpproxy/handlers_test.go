@@ -43,8 +43,9 @@ func newTestMCPProxyWithTracer(t tracingapi.MCPTracer) *mcpRequestContext {
 	return &mcpRequestContext{
 		metrics: stubMetrics{},
 		ProxyConfig: &ProxyConfig{
-			sessionCrypto:      sessionCrypto,
-			toolChangeSignaler: newMultiWatcherSignaler(),
+			sessionCrypto:        sessionCrypto,
+			toolChangeSignaler:   newMultiWatcherSignaler(),
+			promptChangeSignaler: newMultiWatcherSignaler(),
 			mcpProxyConfig: &mcpProxyConfig{
 				backendListenerAddr: "http://test-backend",
 				routes: map[filterapi.MCPRouteName]*mcpProxyConfigRoute{

@@ -66,9 +66,11 @@ func getMaxRequestBodySize() int64 {
 
 // NewMCPProxy creates a new MCPProxy instance.
 func NewMCPProxy(l *slog.Logger, mcpMetrics metrics.MCPMetrics, tracer tracingapi.MCPTracer, sessionCrypto SessionCrypto, logRequestHeaderAttributes map[string]string) (*ProxyConfig, *http.ServeMux, error) {
-	toolChangeSignaler := newMultiWatcherSignaler() // used to signal changes to all active sessions.
+	toolChangeSignaler := newMultiWatcherSignaler()   // used to signal changes to all active sessions.
+	promptChangeSignaler := newMultiWatcherSignaler() // used to signal prompt changes to all active sessions.
 	cfg := &ProxyConfig{
 		toolChangeSignaler:         toolChangeSignaler,
+		promptChangeSignaler:       promptChangeSignaler,
 		tracer:                     tracer,
 		sessionCrypto:              sessionCrypto,
 		l:                          l,

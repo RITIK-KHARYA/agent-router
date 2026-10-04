@@ -98,8 +98,9 @@ func TestLoadConfig_NilMCPConfig(t *testing.T) {
 
 func TestLoadConfig_BasicConfiguration(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -168,7 +169,8 @@ func TestLoadConfig_ToolsChangedNotification(t *testing.T) {
 				},
 			},
 		},
-		toolChangeSignaler: toolChangeSignaler,
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	// Update with a different backend (tools changed)
@@ -216,7 +218,8 @@ func TestLoadConfig_NoToolsChangedNotification(t *testing.T) {
 				},
 			},
 		},
-		toolChangeSignaler: toolChangeSignaler,
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	// Update with same backends but different BackendListenerAddr (tools NOT changed)
@@ -248,8 +251,9 @@ func TestLoadConfig_NoToolsChangedNotification(t *testing.T) {
 
 func TestLoadConfig_ExcludeConfiguration(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -290,8 +294,9 @@ func TestLoadConfig_ExcludeConfiguration(t *testing.T) {
 
 func TestLoadConfig_InvalidRegex(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -320,8 +325,9 @@ func TestLoadConfig_InvalidRegex(t *testing.T) {
 
 func TestLoadConfig_InvalidBackendSelectorCEL(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -350,8 +356,9 @@ func TestLoadConfig_InvalidBackendSelectorCEL(t *testing.T) {
 
 func TestLoadConfig_InvalidExcludeRegex(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -399,7 +406,8 @@ func TestLoadConfig_ToolSelectorChange(t *testing.T) {
 				},
 			},
 		},
-		toolChangeSignaler: toolChangeSignaler,
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	// Update with different tool selector (tools changed)
@@ -470,7 +478,8 @@ func TestLoadConfig_ToolOrderDoesNotMatter(t *testing.T) {
 				},
 			},
 		},
-		toolChangeSignaler: toolChangeSignaler,
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	// Update with same tools and regexps but in different order
@@ -593,7 +602,8 @@ func TestLoadConfig_AuthorizationChangeTriggersNotification(t *testing.T) {
 				},
 			},
 		},
-		toolChangeSignaler: toolChangeSignaler,
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	// Update with different authorization rules — should trigger tools/list notification.
@@ -634,8 +644,9 @@ func TestLoadConfig_AuthorizationChangeTriggersNotification(t *testing.T) {
 // of session-scoped state, so it must be correct and stable across reloads.
 func TestLoadConfig_NeverModeToolIndex(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -681,8 +692,9 @@ func TestLoadConfig_NeverModeToolIndex(t *testing.T) {
 // backends that declare it get their prompts indexed for bare exposure under PrefixMode=Never.
 func TestLoadConfig_NeverModePromptIndex(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	config := &filterapi.Config{
@@ -731,9 +743,10 @@ func TestLoadConfig_NeverModePromptIndex(t *testing.T) {
 // first backend to claim a name should win rather than LoadConfig failing outright.
 func TestLoadConfig_NeverModeToolIndexCollision(t *testing.T) {
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: newMultiWatcherSignaler(),
-		l:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   newMultiWatcherSignaler(),
+		promptChangeSignaler: newMultiWatcherSignaler(),
+		l:                    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	config := &filterapi.Config{
@@ -768,8 +781,9 @@ func TestLoadConfig_PrefixModeChangeTriggersNotification(t *testing.T) {
 	watcher := toolChangeSignaler.Watch()
 
 	proxy := &ProxyConfig{
-		mcpProxyConfig:     &mcpProxyConfig{},
-		toolChangeSignaler: toolChangeSignaler,
+		mcpProxyConfig:       &mcpProxyConfig{},
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(),
 	}
 
 	baseBackend := filterapi.MCPBackend{
@@ -807,4 +821,275 @@ func TestLoadConfig_PrefixModeChangeTriggersNotification(t *testing.T) {
 	require.NoError(t, proxy.LoadConfig(t.Context(), changed))
 	wg.Wait()
 	require.Equal(t, map[string]string{"search": "backend1"}, proxy.routes["route1"].neverModeToolIndex)
+}
+
+// TestLoadConfig_PromptOnlyChangeMustNotFireToolSignaler verifies the core bug fix: a config
+// reload that changes only prompt-affecting state (promptSelectors) must NOT fire the tool
+// change signaler, since mergeToolsList reads only tool-affecting state and the resulting
+// notifications/tools/list_changed would be a spurious, wrong-type notification. Before the
+// fix, sameTools compared promptSelectors/neverModePromptIndex and LoadConfig routed every
+// detected change through the single toolChangeSignaler, so a prompt-only reload incorrectly
+// emitted notifications/tools/list_changed.
+func TestLoadConfig_PromptOnlyChangeMustNotFireToolSignaler(t *testing.T) {
+	toolChangeSignaler := newMultiWatcherSignaler()
+	toolWatcher := toolChangeSignaler.Watch()
+
+	// Pre-populate the initial route state directly (no initial LoadConfig) so the only
+	// LoadConfig call below is the prompt-only change. This mirrors the pattern in
+	// TestLoadConfig_NoToolsChangedNotification.
+	proxy := &ProxyConfig{
+		mcpProxyConfig: &mcpProxyConfig{
+			backendListenerAddr: "http://localhost:8080",
+			routes: map[filterapi.MCPRouteName]*mcpProxyConfigRoute{
+				"route1": {
+					backends: map[filterapi.MCPBackendName]filterapi.MCPBackend{
+						"backend1": {Name: "backend1"},
+					},
+					toolSelectors:   map[filterapi.MCPBackendName]*toolSelector{},
+					promptSelectors: map[filterapi.MCPBackendName]*toolSelector{},
+				},
+			},
+		},
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: newMultiWatcherSignaler(), // not under test here; isolated.
+	}
+
+	// Add a PromptSelector to backend1 — a prompt-only change. No ToolSelector, PrefixMode,
+	// backend-set, or authorization field changes, so mergeToolsList output is unaffected.
+	config := &filterapi.Config{
+		MCPConfig: &filterapi.MCPConfig{
+			BackendListenerAddr: "http://localhost:8080",
+			Routes: []filterapi.MCPRoute{
+				{
+					Name: "route1",
+					Backends: []filterapi.MCPBackend{
+						{
+							Name:           "backend1",
+							PromptSelector: &filterapi.MCPPromptSelector{Exclude: []string{"internal"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		select {
+		case <-toolWatcher:
+			t.Error("BUG: toolChangeSignaler fired on a prompt-only config change; sameTools must not compare prompt-affecting fields")
+		case <-time.After(100 * time.Millisecond):
+			// Expected — the tool signaler must not fire for a prompt-only change.
+		}
+	})
+
+	require.NoError(t, proxy.LoadConfig(t.Context(), config))
+	wg.Wait()
+}
+
+// TestLoadConfig_PromptChangeTriggersPromptNotification verifies the second half of the fix:
+// a prompt-only config reload must fire the promptChangeSignaler so streamNotifications
+// emits notifications/prompts/list_changed. Mirrors TestLoadConfig_AuthorizationChangeTriggersNotification
+// but for the prompt signaler, and asserts the tool signaler stays silent for a prompt-only change.
+func TestLoadConfig_PromptChangeTriggersPromptNotification(t *testing.T) {
+	toolChangeSignaler := newMultiWatcherSignaler()
+	promptChangeSignaler := newMultiWatcherSignaler()
+	toolWatcher := toolChangeSignaler.Watch()
+	promptWatcher := promptChangeSignaler.Watch()
+
+	proxy := &ProxyConfig{
+		mcpProxyConfig: &mcpProxyConfig{
+			backendListenerAddr: "http://localhost:8080",
+			routes: map[filterapi.MCPRouteName]*mcpProxyConfigRoute{
+				"route1": {
+					backends: map[filterapi.MCPBackendName]filterapi.MCPBackend{
+						"backend1": {Name: "backend1"},
+					},
+					toolSelectors:   map[filterapi.MCPBackendName]*toolSelector{},
+					promptSelectors: map[filterapi.MCPBackendName]*toolSelector{},
+				},
+			},
+		},
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: promptChangeSignaler,
+	}
+
+	// Prompt-only change: add a PromptSelector.Exclude.
+	config := &filterapi.Config{
+		MCPConfig: &filterapi.MCPConfig{
+			BackendListenerAddr: "http://localhost:8080",
+			Routes: []filterapi.MCPRoute{
+				{
+					Name: "route1",
+					Backends: []filterapi.MCPBackend{
+						{
+							Name:           "backend1",
+							PromptSelector: &filterapi.MCPPromptSelector{Exclude: []string{"internal"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		select {
+		case <-promptWatcher:
+			// Expected — a prompt-only change must fire the prompt signaler.
+		case <-time.After(100 * time.Millisecond):
+			t.Error("expected prompt changed notification on prompt-only config change but didn't receive one")
+		}
+	})
+	wg.Go(func() {
+		select {
+		case <-toolWatcher:
+			t.Error("BUG: toolChangeSignaler fired on a prompt-only config change")
+		case <-time.After(100 * time.Millisecond):
+			// Expected — the tool signaler must not fire for a prompt-only change.
+		}
+	})
+
+	require.NoError(t, proxy.LoadConfig(t.Context(), config))
+	wg.Wait()
+}
+
+// TestLoadConfig_PrefixModeFlipAffectsBothSignalers verifies that flipping a backend's
+// effective PrefixMode (which recomputes both neverModeToolIndex and neverModePromptIndex)
+// fires BOTH signalers, since a PrefixMode flip changes both the tool and prompt name
+// surfaces. This guards against an over-split where a PrefixMode change only fires one.
+func TestLoadConfig_PrefixModeFlipAffectsBothSignalers(t *testing.T) {
+	toolChangeSignaler := newMultiWatcherSignaler()
+	promptChangeSignaler := newMultiWatcherSignaler()
+	toolWatcher := toolChangeSignaler.Watch()
+	promptWatcher := promptChangeSignaler.Watch()
+
+	// Initial route with a ToolSelector AND PromptSelector present, but empty never-mode
+	// indexes (Always mode). Pre-populated directly so the only LoadConfig is the flip.
+	proxy := &ProxyConfig{
+		mcpProxyConfig: &mcpProxyConfig{
+			backendListenerAddr: "http://localhost:8080",
+			routes: map[filterapi.MCPRouteName]*mcpProxyConfigRoute{
+				"route1": {
+					backends: map[filterapi.MCPBackendName]filterapi.MCPBackend{
+						"backend1": {
+							Name:           "backend1",
+							ToolSelector:   &filterapi.MCPToolSelector{Include: []string{"search"}},
+							PromptSelector: &filterapi.MCPPromptSelector{Include: []string{"greeting"}},
+						},
+					},
+					toolSelectors: map[filterapi.MCPBackendName]*toolSelector{
+						"backend1": {include: map[string]struct{}{"search": {}}},
+					},
+					promptSelectors: map[filterapi.MCPBackendName]*toolSelector{
+						"backend1": {include: map[string]struct{}{"greeting": {}}},
+					},
+					neverModeToolIndex:   map[string]string{},
+					neverModePromptIndex: map[string]string{},
+				},
+			},
+		},
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: promptChangeSignaler,
+	}
+
+	// Flip PrefixMode to Never — recomputes both neverModeToolIndex and neverModePromptIndex.
+	changed := &filterapi.Config{
+		MCPConfig: &filterapi.MCPConfig{
+			BackendListenerAddr: "http://localhost:8080",
+			Routes: []filterapi.MCPRoute{
+				{
+					Name: "route1",
+					Backends: []filterapi.MCPBackend{
+						{
+							Name:           "backend1",
+							PrefixMode:     filterapi.PrefixModeNever,
+							ToolSelector:   &filterapi.MCPToolSelector{Include: []string{"search"}},
+							PromptSelector: &filterapi.MCPPromptSelector{Include: []string{"greeting"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		select {
+		case <-toolWatcher:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("expected tools changed notification on PrefixMode change but didn't receive one")
+		}
+	})
+	wg.Go(func() {
+		select {
+		case <-promptWatcher:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("expected prompt changed notification on PrefixMode change but didn't receive one")
+		}
+	})
+
+	require.NoError(t, proxy.LoadConfig(t.Context(), changed))
+	wg.Wait()
+	require.Equal(t, map[string]string{"search": "backend1"}, proxy.routes["route1"].neverModeToolIndex)
+	require.Equal(t, map[string]string{"greeting": "backend1"}, proxy.routes["route1"].neverModePromptIndex)
+}
+
+// TestLoadConfig_ToolOnlyChangeMustNotFirePromptSignaler verifies the inverse: a tool-only
+// change (toolSelectors, with no prompt field change) must NOT fire the prompt signaler.
+func TestLoadConfig_ToolOnlyChangeMustNotFirePromptSignaler(t *testing.T) {
+	toolChangeSignaler := newMultiWatcherSignaler()
+	promptChangeSignaler := newMultiWatcherSignaler()
+	promptWatcher := promptChangeSignaler.Watch()
+
+	proxy := &ProxyConfig{
+		mcpProxyConfig: &mcpProxyConfig{
+			backendListenerAddr: "http://localhost:8080",
+			routes: map[filterapi.MCPRouteName]*mcpProxyConfigRoute{
+				"route1": {
+					backends: map[filterapi.MCPBackendName]filterapi.MCPBackend{
+						"backend1": {Name: "backend1"},
+					},
+					toolSelectors: map[filterapi.MCPBackendName]*toolSelector{
+						"backend1": {include: map[string]struct{}{"search": {}}},
+					},
+					promptSelectors: map[filterapi.MCPBackendName]*toolSelector{},
+				},
+			},
+		},
+		toolChangeSignaler:   toolChangeSignaler,
+		promptChangeSignaler: promptChangeSignaler,
+	}
+
+	// Tool-only change: alter ToolSelector.Include. No PromptSelector present, so prompt
+	// state is unchanged (both promptSelectors nil/empty, neverModePromptIndex empty).
+	config := &filterapi.Config{
+		MCPConfig: &filterapi.MCPConfig{
+			BackendListenerAddr: "http://localhost:8080",
+			Routes: []filterapi.MCPRoute{
+				{
+					Name: "route1",
+					Backends: []filterapi.MCPBackend{
+						{
+							Name:         "backend1",
+							ToolSelector: &filterapi.MCPToolSelector{Include: []string{"search", "fetch"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		select {
+		case <-promptWatcher:
+			t.Error("BUG: promptChangeSignaler fired on a tool-only config change")
+		case <-time.After(100 * time.Millisecond):
+			// Expected — the prompt signaler must not fire for a tool-only change.
+		}
+	})
+
+	require.NoError(t, proxy.LoadConfig(t.Context(), config))
+	wg.Wait()
 }
