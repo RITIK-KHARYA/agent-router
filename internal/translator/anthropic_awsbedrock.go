@@ -46,6 +46,14 @@ type anthropicToAWSBedrockTranslator struct {
 	pendingBlockStartIdx int
 	// streamingUsage tracks the latest usage from metadata events for emission in SSE.
 	streamingUsage *awsbedrock.TokenUsage
+	// pendingMessageStop stashes the Bedrock messageStop event until the terminal metadata event
+	// is decoded. Bedrock's converse-stream only reports token usage on the metadata event,
+	// which is the last event of the stream and arrives in a later ResponseBody call than
+	// messageStop under incremental (per-chunk) delivery (the production extproc STREAMED mode).
+	// message_start is emitted immediately (it must be the first event of the stream) with a
+	// placeholder 0 for input_tokens; the real input_tokens and output_tokens are carried on the
+	// deferred message_delta. See flushPendingSSE.
+	pendingMessageStop *awsbedrock.ConverseStreamEvent
 }
 
 // RequestBody implements [AnthropicMessagesTranslator.RequestBody].
@@ -485,7 +493,7 @@ func (a *anthropicToAWSBedrockTranslator) ResponseHeaders(headers map[string]str
 }
 
 // ResponseBody implements [AnthropicMessagesTranslator.ResponseBody].
-func (a *anthropicToAWSBedrockTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracingapi.MessageSpan) (
+func (a *anthropicToAWSBedrockTranslator) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracingapi.MessageSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel internalapi.ResponseModel, err error,
 ) {
 	responseModel = a.requestModel
@@ -499,13 +507,6 @@ func (a *anthropicToAWSBedrockTranslator) ResponseBody(_ map[string]string, body
 		a.bufferedBody = append(a.bufferedBody, buf...)
 		a.extractAmazonEventStreamEvents()
 
-		// Pre-scan for metadata usage so it's available when emitting message_delta.
-		for i := range a.events {
-			if a.events[i].EventType == awsbedrock.ConverseStreamEventTypeMetadata.String() && a.events[i].Usage != nil {
-				a.streamingUsage = a.events[i].Usage
-			}
-		}
-
 		for i := range a.events {
 			event := &a.events[i]
 			if usage := event.Usage; usage != nil {
@@ -513,6 +514,13 @@ func (a *anthropicToAWSBedrockTranslator) ResponseBody(_ map[string]string, body
 					usage.CacheReadInputTokens, usage.CacheWriteInputTokens)
 			}
 			a.convertEventToAnthropicSSE(event, &newBody)
+		}
+
+		// On the final chunk, emit any stashed message_delta/message_stop in case the terminal
+		// metadata event never arrived (interrupted stream). When metadata did arrive it is
+		// flushed by the metadata case during the loop above, so this is a no-op.
+		if endOfStream {
+			a.flushPendingSSE(&newBody)
 		}
 		return
 	}
@@ -639,10 +647,14 @@ func (a *anthropicToAWSBedrockTranslator) convertEventToAnthropicSSE(event *awsb
 			return
 		}
 		a.role = *event.Role
-		inputTokens := 0
-		if a.streamingUsage != nil {
-			inputTokens = int(a.streamingUsage.InputTokens)
-		}
+		// Emit message_start immediately as the first event of the stream — the Anthropic SSE
+		// contract requires it to precede all content events, and the SDKs reject streams
+		// where content_block_* arrives before message_start. Bedrock only reports token
+		// usage on the terminal metadata event (a later chunk under incremental delivery), so
+		// input_tokens is not yet known; emit a placeholder 0 here and carry the real
+		// input_tokens (plus output_tokens) on the deferred message_delta, which the SDK's
+		// streaming accumulator also reads (same pattern as the anthropic_anthropic
+		// translator's message_delta handling, see issue #2290).
 		msgStart := map[string]any{
 			"type": "message_start",
 			"message": map[string]any{
@@ -654,7 +666,7 @@ func (a *anthropicToAWSBedrockTranslator) convertEventToAnthropicSSE(event *awsb
 				"stop_reason":   nil,
 				"stop_sequence": nil,
 				"usage": map[string]any{
-					"input_tokens":  inputTokens,
+					"input_tokens":  0,
 					"output_tokens": 0,
 				},
 			},
@@ -746,9 +758,41 @@ func (a *anthropicToAWSBedrockTranslator) convertEventToAnthropicSSE(event *awsb
 		if event.StopReason == nil {
 			return
 		}
-		stopReason := a.bedrockStopReasonToAnthropicStopReason(*event.StopReason)
+		// Defer emitting message_delta/message_stop until the terminal metadata event provides
+		// output token usage. Under incremental delivery metadata arrives in a later ResponseBody
+		// call than messageStop, so emitting here would report output_tokens:0. Copy the event
+		// off the reused a.events slice (which extractAmazonEventStreamEvents clears on the next
+		// call) so the stashed value survives until the flush.
+		stopEvent := *event
+		a.pendingMessageStop = &stopEvent
+
+	case awsbedrock.ConverseStreamEventTypeMetadata.String():
+		if event.Usage != nil {
+			a.streamingUsage = event.Usage
+		}
+		// The metadata event is the terminal event of a Bedrock converse-stream and the only one
+		// carrying token usage. Flush the message_delta/message_stop stashed when messageStop was
+		// decoded (in this or an earlier chunk), now that the usage is known.
+		a.flushPendingSSE(out)
+	}
+}
+
+// flushPendingSSE emits the message_delta and message_stop SSE events stashed while waiting for
+// the terminal metadata event to provide token usage. message_start is emitted immediately when
+// messageStart arrives (it must be the first event of the stream) with a placeholder 0 for
+// input_tokens; the real input_tokens and output_tokens are carried on the deferred
+// message_delta, which the SDK streaming accumulator reads (see issue #2290). flushPendingSSE is
+// invoked from the metadata case once usage is known, and again from ResponseBody on endOfStream
+// as a fallback for streams that end without a metadata event. It is idempotent: after a flush,
+// the stashed stop event is cleared, so subsequent calls emit nothing — the endOfStream fallback
+// is a no-op when metadata already triggered the flush.
+func (a *anthropicToAWSBedrockTranslator) flushPendingSSE(out *[]byte) {
+	if a.pendingMessageStop != nil {
+		stopReason := a.bedrockStopReasonToAnthropicStopReason(*a.pendingMessageStop.StopReason)
+		inputTokens := 0
 		outputTokens := 0
 		if a.streamingUsage != nil {
+			inputTokens = int(a.streamingUsage.InputTokens)
 			outputTokens = int(a.streamingUsage.OutputTokens)
 		}
 		msgDelta := map[string]any{
@@ -758,6 +802,7 @@ func (a *anthropicToAWSBedrockTranslator) convertEventToAnthropicSSE(event *awsb
 				"stop_sequence": nil,
 			},
 			"usage": map[string]any{
+				"input_tokens":  inputTokens,
 				"output_tokens": outputTokens,
 			},
 		}
@@ -766,11 +811,7 @@ func (a *anthropicToAWSBedrockTranslator) convertEventToAnthropicSSE(event *awsb
 			"type": "message_stop",
 		}
 		a.writeSSEEvent("message_stop", msgStop, out)
-
-	case awsbedrock.ConverseStreamEventTypeMetadata.String():
-		if event.Usage != nil {
-			a.streamingUsage = event.Usage
-		}
+		a.pendingMessageStop = nil
 	}
 }
 

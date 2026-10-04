@@ -2048,3 +2048,143 @@ func TestAnthropicToAWSBedrockTranslator_RequestBody_CacheControlOnPromotedSyste
 	require.NotNil(t, bedrockReq.System[1].CachePoint)
 	assert.Equal(t, "default", bedrockReq.System[1].CachePoint.Type)
 }
+
+// TestAnthropicToAWSBedrockTranslator_ResponseBody_StreamingIncremental verifies that the
+// streaming translator reports correct token usage when the Bedrock eventstream is delivered to
+// ResponseBody incrementally — one chunk per event (or even one byte at a time) — which is how
+// the production extproc framework (ProcessingMode_STREAMED) invokes ResponseBody, rather than
+// the single-call endOfStream=true delivery every existing test used. Under incremental delivery
+// the terminal metadata event (the only one carrying token usage) arrives in a later ResponseBody
+// call than messageStart/messageStop, so message_start (input_tokens) and message_delta
+// (output_tokens) must not be emitted until metadata is seen, otherwise they report 0.
+func TestAnthropicToAWSBedrockTranslator_ResponseBody_StreamingIncremental(t *testing.T) {
+	// canonicalEventBytes encodes the standard Bedrock converse-stream sequence
+	// (messageStart -> contentBlock* -> messageStop -> metadata) as one byte slice per event, so
+	// subtests can deliver arbitrary groupings of events across separate ResponseBody calls.
+	canonicalEventBytes := func() [][]byte {
+		events := []struct {
+			eventType string
+			payload   map[string]any
+		}{
+			{eventType: "messageStart", payload: map[string]any{"role": "assistant"}},
+			{eventType: "contentBlockStart", payload: map[string]any{"contentBlockIndex": 0}},
+			{eventType: "contentBlockDelta", payload: map[string]any{"contentBlockIndex": 0, "delta": map[string]any{"text": "Hello"}}},
+			{eventType: "contentBlockStop", payload: map[string]any{"contentBlockIndex": 0}},
+			{eventType: "messageStop", payload: map[string]any{"stopReason": "end_turn"}},
+			{eventType: "metadata", payload: map[string]any{"usage": map[string]any{"inputTokens": 5, "outputTokens": 3, "totalTokens": 8}}},
+		}
+		out := make([][]byte, len(events))
+		for i, ev := range events {
+			payload, err := json.Marshal(ev.payload)
+			require.NoError(t, err)
+			var buf bytes.Buffer
+			writeEventStreamMessage(t, &buf, ev.eventType, payload)
+			out[i] = buf.Bytes()
+		}
+		return out
+	}
+
+	newTranslator := func() AnthropicMessagesTranslator {
+		translator := NewAnthropicToAWSBedrockTranslator("")
+		req := &anthropicschema.MessagesRequest{
+			Model: "test-model", MaxTokens: 100, Stream: true,
+			Messages: []anthropicschema.MessageParam{
+				{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hi"}},
+			},
+		}
+		rawBody, _ := json.Marshal(req)
+		_, _, _ = translator.RequestBody(rawBody, req, false)
+		_, _ = translator.ResponseHeaders(map[string]string{
+			"content-type":     "application/vnd.amazon.eventstream",
+			"x-amzn-requestid": "stream-req-123",
+		})
+		return translator
+	}
+
+	// assertExpectedSSE mirrors the canonical single-call test's expectations: every event type
+	// is present, text is streamed, and usage is populated from the metadata event (not 0).
+	assertExpectedSSE := func(t *testing.T, bodyStr string) {
+		t.Helper()
+		for _, want := range []string{
+			"event: message_start", "event: content_block_start", "event: content_block_delta",
+			"event: content_block_stop", "event: message_delta", "event: message_stop",
+			`"text":"Hello"`, `"input_tokens":5`, `"output_tokens":3`,
+		} {
+			assert.Contains(t, bodyStr, want)
+		}
+	}
+
+	t.Run("one event per chunk", func(t *testing.T) {
+		translator := newTranslator()
+		eventBytes := canonicalEventBytes()
+		var assembledBody bytes.Buffer
+		for i, ch := range eventBytes {
+			_, body, tokenUsage, _, err := translator.ResponseBody(nil, bytes.NewReader(ch), i == len(eventBytes)-1, nil)
+			require.NoError(t, err)
+			assembledBody.Write(body)
+			// Token usage is only reported on the chunk that carries the metadata event.
+			if i == len(eventBytes)-1 {
+				inputTokens, ok := tokenUsage.InputTokens()
+				require.True(t, ok)
+				assert.Equal(t, uint32(5), inputTokens)
+				outputTokens, ok := tokenUsage.OutputTokens()
+				require.True(t, ok)
+				assert.Equal(t, uint32(3), outputTokens)
+			}
+		}
+		assertExpectedSSE(t, assembledBody.String())
+	})
+
+	t.Run("messageStop and metadata coalesced in final chunk", func(t *testing.T) {
+		translator := newTranslator()
+		eventBytes := canonicalEventBytes()
+		// messageStart alone, then content blocks, then messageStop + metadata together.
+		groups := [][]int{{0}, {1, 2, 3}, {4, 5}}
+		var assembledBody bytes.Buffer
+		for gi, group := range groups {
+			var chunk []byte
+			for _, idx := range group {
+				chunk = append(chunk, eventBytes[idx]...)
+			}
+			_, body, _, _, err := translator.ResponseBody(nil, bytes.NewReader(chunk), gi == len(groups)-1, nil)
+			require.NoError(t, err)
+			assembledBody.Write(body)
+		}
+		assertExpectedSSE(t, assembledBody.String())
+	})
+
+	t.Run("byte by byte reassembly", func(t *testing.T) {
+		translator := newTranslator()
+		var all []byte
+		for _, ch := range canonicalEventBytes() {
+			all = append(all, ch...)
+		}
+		var assembledBody bytes.Buffer
+		for i := range all {
+			_, body, _, _, err := translator.ResponseBody(nil, bytes.NewReader([]byte{all[i]}), i == len(all)-1, nil)
+			require.NoError(t, err)
+			assembledBody.Write(body)
+		}
+		assertExpectedSSE(t, assembledBody.String())
+	})
+
+	t.Run("interrupted stream flushes stashed events without metadata", func(t *testing.T) {
+		translator := newTranslator()
+		eventBytes := canonicalEventBytes()
+		// Deliver every event except the terminal metadata, then end the stream. The stashed
+		// message_start/message_delta/message_stop must still be flushed (with 0 usage, since the
+		// metadata event never arrived) rather than being dropped entirely.
+		var assembledBody bytes.Buffer
+		for i := 0; i < len(eventBytes)-1; i++ {
+			_, body, _, _, err := translator.ResponseBody(nil, bytes.NewReader(eventBytes[i]), i == len(eventBytes)-2, nil)
+			require.NoError(t, err)
+			assembledBody.Write(body)
+		}
+		bodyStr := assembledBody.String()
+		assert.Contains(t, bodyStr, "event: message_start")
+		assert.Contains(t, bodyStr, "event: message_delta")
+		assert.Contains(t, bodyStr, "event: message_stop")
+		assert.Contains(t, bodyStr, `"input_tokens":0`)
+		assert.Contains(t, bodyStr, `"output_tokens":0`)
+	})
+}
