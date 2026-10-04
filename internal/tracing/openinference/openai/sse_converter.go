@@ -34,6 +34,13 @@ func convertSSEToJSON(chunks []*openai.ChatCompletionResponseChunk) *openai.Chat
 		obfuscation  string
 		finishReason openai.ChatCompletionChoicesFinishReason
 		model        string
+
+		// Tool calls are accumulated by the provider-supplied call.Index so
+		// argument fragments that arrive in later chunks are attributed to the
+		// originating call even when a chunk reorders or omits calls. The
+		// first appearance of an index fixes its position in the output slice.
+		toolCalls     []openai.ChatCompletionMessageToolCallParam
+		toolCallOrder map[int64]int
 	)
 
 	for _, chunk := range chunks {
@@ -63,6 +70,31 @@ func convertSSEToJSON(chunks []*openai.ChatCompletionResponseChunk) *openai.Chat
 				}
 				if as := chunk.Choices[0].Delta.Annotations; as != nil && len(*as) > 0 {
 					annotations = append(annotations, *as...)
+				}
+				for j := range chunk.Choices[0].Delta.ToolCalls {
+					call := &chunk.Choices[0].Delta.ToolCalls[j]
+					if toolCallOrder == nil {
+						toolCallOrder = map[int64]int{}
+					}
+					pos, ok := toolCallOrder[call.Index]
+					if !ok {
+						pos = len(toolCalls)
+						toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallParam{})
+						toolCallOrder[call.Index] = pos
+					}
+					tc := &toolCalls[pos]
+					// The first non-empty values win; arguments stream as
+					// fragments that must be concatenated in arrival order.
+					if call.ID != nil && *call.ID != "" {
+						tc.ID = call.ID
+					}
+					if call.Type != "" {
+						tc.Type = call.Type
+					}
+					if call.Function.Name != "" {
+						tc.Function.Name = call.Function.Name
+					}
+					tc.Function.Arguments += call.Function.Arguments
 				}
 			}
 			// Capture finish_reason from any chunk that has it.
@@ -130,6 +162,7 @@ func convertSSEToJSON(chunks []*openai.ChatCompletionResponseChunk) *openai.Chat
 				Role:        role,
 				Content:     &contentStr,
 				Annotations: annotationsPtr,
+				ToolCalls:   toolCalls,
 			},
 			Index:        0,
 			FinishReason: finishReason,
