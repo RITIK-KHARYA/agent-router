@@ -45,7 +45,8 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 	// Convert Chat Completion messages to Bedrock format using the shared converters
 	// (see converse_helper.go) so the tokenize path counts exactly what the chat path sends.
 	converseInput.Messages = make([]*awsbedrock.Message, 0, len(tokenizeChatReq.Messages))
-	for i := range tokenizeChatReq.Messages {
+	openAIReqMessageLen, i := len(tokenizeChatReq.Messages), 0
+	for i < openAIReqMessageLen {
 		msg := &tokenizeChatReq.Messages[i]
 		role := msg.ExtractMessgaeRole()
 		switch {
@@ -69,14 +70,34 @@ func (o *ToAWSBedrockV1Tokenize) tokenizeToBedrockCountTokens(tokenizeChatReq *t
 				return nil, err
 			}
 		case msg.OfTool != nil:
+			// Bedrock does not support a tool role, merging to the user role.
 			bedrockMessage, err := openAIMessageToBedrockMessageRoleTool(msg.OfTool, awsbedrock.ConversationRoleUser)
 			if err != nil {
 				return nil, err
+			}
+			// Coalesce consecutive tool messages into a single Bedrock user message
+			// with multiple toolResult content blocks, mirroring the chat completion
+			// translator (openai_awsbedrock.go) so the tokenize path counts exactly
+			// what the chat path sends.
+			for i+1 < openAIReqMessageLen {
+				nextMessage := &tokenizeChatReq.Messages[i+1]
+				if nextMessage.ExtractMessgaeRole() != openai.ChatMessageRoleTool {
+					break
+				}
+				nextBedrockMessage, err := openAIMessageToBedrockMessageRoleTool(nextMessage.OfTool, awsbedrock.ConversationRoleUser)
+				if err != nil {
+					return nil, err
+				}
+				if len(nextBedrockMessage.Content) > 0 {
+					bedrockMessage.Content = append(bedrockMessage.Content, nextBedrockMessage.Content[0])
+				}
+				i++
 			}
 			converseInput.Messages = append(converseInput.Messages, bedrockMessage)
 		default:
 			return nil, fmt.Errorf("unexpected role: %s", role)
 		}
+		i++
 	}
 
 	// Convert ToolConfiguration if tools are present.
