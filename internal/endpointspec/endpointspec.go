@@ -410,9 +410,12 @@ func (ResponsesEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Response
 	redacted.Instructions = redaction.RedactString(req.Instructions)
 	redacted.User = redaction.RedactString(req.User)
 	// Input and Prompt are JSON unions holding conversation items / content — redact every
-	// nested string leaf via the generic redactor so user content inside any item type is caught.
-	redacted.Input = redactUnionField(req.Input)
-	redacted.Prompt = redactUnionField(req.Prompt)
+	// nested string leaf via the generic redactor so user content inside any item type is
+	// caught. Input items (ResponseInputItemUnionParam) discriminate on both "type" and "role"
+	// (assistant turns route on role), so both keys must be preserved or the union round-trip
+	// drops the whole input from the debug log. Prompt discriminates on "type" only.
+	redacted.Input = redactUnionField(req.Input, "type", "role")
+	redacted.Prompt = redactUnionField(req.Prompt, "type")
 	return &redacted, nil
 }
 
@@ -463,15 +466,17 @@ func (MessagesEndpointSpec) GetTranslator(schema filterapi.VersionedAPISchema, m
 func (MessagesEndpointSpec) RedactSensitiveInfoFromRequest(req *anthropic.MessagesRequest) (redactedReq *anthropic.MessagesRequest, err error) {
 	redacted := *req
 	// Message content (text or []ContentBlockParam) and the system prompt hold user/developer
-	// text. They are JSON unions, so redact every nested string leaf generically.
+	// text. They are JSON unions, so redact every nested string leaf generically. ContentBlockParam
+	// discriminates on "type" (required), and TextBlockParam carries a "type" enum — preserve "type"
+	// so the redacted tree round-trips and the block-kind enum stays readable.
 	redacted.Messages = make([]anthropic.MessageParam, len(req.Messages))
 	for i, msg := range req.Messages {
 		redactedMsg := msg
-		redactedMsg.Content = redactUnionField(msg.Content)
+		redactedMsg.Content = redactUnionField(msg.Content, "type")
 		redacted.Messages[i] = redactedMsg
 	}
 	if req.System != nil {
-		redacted.System = ptr.To(redactUnionField(*req.System))
+		redacted.System = ptr.To(redactUnionField(*req.System, "type"))
 	}
 	return &redacted, nil
 }
@@ -863,9 +868,13 @@ func redactUserContentPart(part openai.ChatCompletionContentPartUserUnionParam) 
 // determined by a custom unmarshaler and may be a string, []string, [][]int,
 // or arbitrary object tree. It normalizes via a marshal→unmarshal-into-any
 // round-trip so [redaction.RedactJSONTree] sees the standard []any/map[string]any
-// shapes, then redacts every string leaf. On a marshal error (the only reachable
-// error path) it returns a single placeholder string so no raw content is ever
-// logged; the subsequent unmarshal-into-any cannot fail on valid JSON output.
+// shapes, then redacts every string leaf. It does not round-trip the result back
+// into a typed union, so no preserveKeys are passed and every string leaf —
+// including any "type"/"role" enum — is over-redacted; this is safe because the
+// redacted generic tree is logged as-is, never re-unmarshaled. On a marshal
+// error (the only reachable error path) it returns a single placeholder string
+// so no raw content is ever logged; the subsequent unmarshal-into-any cannot
+// fail on valid JSON output.
 func redactInterfaceValue(v any) any {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -885,29 +894,37 @@ func redactInterfaceValue(v any) any {
 // returns the zero value of T (nil for pointers, an empty struct otherwise) so
 // the field logs as absent rather than leaking content.
 //
+// preserveKeys must name every JSON-union discriminator key that T's custom
+// UnmarshalJSON branches on (e.g. "type"; and additionally "role" for the OpenAI
+// Responses `input` union, whose items route assistant turns on role:"assistant").
+// The redacted tree round-trips into T only when all such discriminators are in
+// preserveKeys; omitting one makes the final unmarshal fail and, via the fail-safe
+// below, drops the whole field from the debug log.
+//
 // The intermediate unmarshal-into-any and the re-marshal of the redacted tree
 // are provably infallible — b is valid JSON from json.Marshal into *any, and
 // [redaction.RedactJSONTree] yields only JSON-native types — so their errors are
-// discarded. The final unmarshal back into T is fail-safe: on the impossible
-// structural mismatch, out stays zero.
+// discarded. The final unmarshal back into T is fail-safe: on the reachable
+// mismatch where preserveKeys under-specifies T's discriminators, out stays
+// zero so the field logs as absent rather than emitting a half-redacted value.
 //
 // Marshaling and unmarshaling go through pointers (&in / &out) so that any
 // pointer-receiver MarshalJSON/UnmarshalJSON on T is actually invoked — passing
 // a value T to json.Marshal would skip pointer-receiver methods and fall back to
 // default struct marshaling, corrupting the union.
-func redactUnionField[T any](in T) (out T) {
+func redactUnionField[T any](in T, preserveKeys ...string) (out T) {
 	b, err := json.Marshal(&in)
 	if err != nil {
 		return out
 	}
 	// b is valid JSON from json.Marshal and generic is *any, so this unmarshal
-	// cannot fail. RedactJSONTree then redacts every string leaf, preserving
-	// "type" discriminators so the tree still round-trips into T.
+	// cannot fail. RedactJSONTree then redacts every string leaf, preserving the
+	// preserveKeys discriminators so the tree still round-trips into T.
 	var generic any
 	_ = json.Unmarshal(b, &generic)
 	// RedactJSONTree yields only JSON-native types, which json.Marshal always
 	// accepts, so this re-marshal cannot fail either.
-	redacted, _ := json.Marshal(redaction.RedactJSONTree(generic))
+	redacted, _ := json.Marshal(redaction.RedactJSONTree(generic, preserveKeys...))
 	_ = json.Unmarshal(redacted, &out) // on error, out stays zero (fail-safe)
 	return out
 }
