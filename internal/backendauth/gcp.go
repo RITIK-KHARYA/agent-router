@@ -32,7 +32,7 @@ type gcpHandler struct {
 	projectName    string             // The GCP project to use for requests.
 }
 
-func newGCPHandler(ctx context.Context, gcpAuth *filterapi.GCPAuth) (filterapi.BackendAuthHandler, error) {
+func newGCPHandler(gcpAuth *filterapi.GCPAuth) (filterapi.BackendAuthHandler, error) {
 	if gcpAuth == nil {
 		return nil, fmt.Errorf("GCP auth configuration cannot be nil")
 	}
@@ -48,8 +48,16 @@ func newGCPHandler(ctx context.Context, gcpAuth *filterapi.GCPAuth) (filterapi.B
 	} else {
 		// Use ADC for GKE Workload Identity. TokenSource auto-refreshes in Do().
 		// Inject HTTP client with proxy support into context for token operations.
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, gcpHTTPClient)
-		creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
+		//
+		// Detach from the caller's ctx: on config reload, ctx is the watcher's
+		// per-tick context which is canceled the moment loadConfig returns
+		// (internal/filterapi/watcher.go). google.FindDefaultCredentials captures
+		// the context and binds it to every future token-refresh HTTP request, so
+		// a canceled ctx would break all subsequent refreshes with "context
+		// canceled". Use context.Background() with only the proxy HTTP client
+		// attached so the token source retains a process-scoped context.
+		adcCtx := context.WithValue(context.Background(), oauth2.HTTPClient, gcpHTTPClient)
+		creds, err := google.FindDefaultCredentials(adcCtx, "https://www.googleapis.com/auth/cloud-platform")
 		if err != nil {
 			return nil, fmt.Errorf("failed to find GCP default credentials: %w", err)
 		}

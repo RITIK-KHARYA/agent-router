@@ -8,6 +8,10 @@ package backendauth
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -59,8 +63,7 @@ func TestNewGCPHandler(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			handler, err := newGCPHandler(ctx, tc.gcpAuth)
+			handler, err := newGCPHandler(tc.gcpAuth)
 			if err != nil {
 				require.True(t, tc.wantError.check, "unexpected error: %v", err)
 				require.ErrorContains(t, err, tc.wantError.msg)
@@ -167,4 +170,73 @@ func TestGCPHandler_Do_TokenSourceError(t *testing.T) {
 
 	_, err := handler.Do(context.Background(), requestHeaders, nil)
 	require.ErrorContains(t, err, "failed to get GCP access token")
+}
+
+// TestNewGCPHandler_ADCSurvivesCanceledContext is a regression test for the
+// config-reload ADC bug.
+//
+// On reload, newGCPHandler was previously invoked under the watcher's per-tick
+// context, which is canceled the instant loadConfig returns
+// (internal/filterapi/watcher.go). google.FindDefaultCredentials captured that
+// context and bound it to every future token-refresh HTTP request, so before
+// the fix every post-reload ADC refresh failed with "context canceled" and
+// Do() could not obtain a token.
+//
+// The fix removed the ctx parameter entirely and derives a process-scoped
+// context.Background() for the credentials lookup, so the token source is not
+// bound to any short-lived caller context. This structurally prevents the bug
+// (there is no caller ctx to capture) and this test exercises the real ADC code
+// path end-to-end to confirm the STS token exchange still works.
+func TestNewGCPHandler_ADCSurvivesCanceledContext(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"fake-access-token","expires_in":3600,"token_type":"Bearer"}`))
+	}))
+	defer sts.Close()
+
+	tmp := t.TempDir()
+	subjectTokenFile := filepath.Join(tmp, "subject-token")
+	if err := os.WriteFile(subjectTokenFile, []byte("dummy-subject-token"), 0o600); err != nil {
+		t.Fatalf("write subject token: %v", err)
+	}
+	credsFile := filepath.Join(tmp, "adc.json")
+	credsJSON := fmt.Sprintf(`{`+
+		`"type":"external_account",`+
+		`"audience":"//iam.googleapis.com/projects/x/locations/global/workloadIdentityPools/y/providers/z",`+
+		`"subject_token_type":"urn:ietf:params:oauth:token-type:jwt",`+
+		`"token_url":%q,`+
+		`"credential_source":{"file":%q}`+
+		`}`, sts.URL, subjectTokenFile)
+	if err := os.WriteFile(credsFile, []byte(credsJSON), 0o600); err != nil {
+		t.Fatalf("write credentials file: %v", err)
+	}
+
+	// Drive ADC resolution at our fake external_account credentials file. The
+	// package-level gcpHTTPClient (initialized at package load) reaches 127.0.0.1
+	// directly because http.ProxyFromEnvironment never proxies the loopback.
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+
+	// Build the handler with no AccessToken so it takes the ADC branch. Even
+	// though the watcher would have previously passed a per-tick context that
+	// is canceled right after construction, the handler ignores any caller
+	// context and the ADC token source refreshes against context.Background().
+	handler, err := newGCPHandler(&filterapi.GCPAuth{
+		Region:      "us-central1",
+		ProjectName: "test-project",
+	})
+	require.NoError(t, err)
+
+	// Simulate a per-request context arriving long after the (now-canceled)
+	// watcher per-tick context. Do() must mint a fresh ADC access token.
+	perTickCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	requestHeaders := map[string]string{":path": "publishers/google/models/gemini-pro:generateContent"}
+	hdrs, err := handler.Do(perTickCtx, requestHeaders, nil)
+	require.NoError(t, err)
+
+	hdrsMap := stringPairsToMap(hdrs)
+	require.Equal(t, "Bearer fake-access-token", hdrsMap["Authorization"])
+	require.Equal(t,
+		"/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
+		hdrsMap[":path"])
 }

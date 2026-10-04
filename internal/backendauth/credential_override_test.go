@@ -253,7 +253,7 @@ func TestCredentialOverrideHandler_PerAuthType(t *testing.T) {
 	})
 
 	t.Run("gcp credentials sets Authorization Bearer and rewrites path", func(t *testing.T) {
-		inner, err := newGCPHandler(t.Context(), &filterapi.GCPAuth{
+		inner, err := newGCPHandler(&filterapi.GCPAuth{
 			AccessToken: "static-token",
 			Region:      "us-central1",
 			ProjectName: "my-project",
@@ -279,7 +279,7 @@ func TestCredentialOverrideHandler_PerAuthType(t *testing.T) {
 	})
 
 	t.Run("gcp missing :path returns error", func(t *testing.T) {
-		inner, err := newGCPHandler(t.Context(), &filterapi.GCPAuth{
+		inner, err := newGCPHandler(&filterapi.GCPAuth{
 			AccessToken: "static-token",
 			Region:      "us-central1",
 			ProjectName: "my-project",
