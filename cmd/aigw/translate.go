@@ -12,8 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"strings"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/go-logr/logr"
@@ -35,76 +33,6 @@ import (
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller"
 )
-
-// translate reads the input files, collects the AI Gateway custom resources,
-// translates them to Envoy Gateway and Kubernetes objects, and writes the translated objects to the output writer.
-func translate(ctx context.Context, paths []string, output, stderr io.Writer) error {
-	stderrLogger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{}))
-	yaml, err := readYamlsAsString(paths)
-	if err != nil {
-		return err
-	}
-	aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSConfigs, originalGateways, originalSecrets, _, err := collectObjects(yaml, output, stderrLogger)
-	if err != nil {
-		return fmt.Errorf("error translating: %w", err)
-	}
-
-	_, _, httpRoutes, extensionPolicies, httpRouteFilter, backends, secrets, backendTrafficPolicies, securityPolicies, err := translateCustomResourceObjects(ctx, aigwRoutes, mcpRoutes, aigwBackends, backendSecurityPolicies, backendTLSConfigs, originalGateways, originalSecrets, stderrLogger)
-	if err != nil {
-		return fmt.Errorf("error emitting: %w", err)
-	}
-
-	// Emit the translated objects.
-	for i := range httpRoutes.Items {
-		httpRoute := &httpRoutes.Items[i]
-		mustWriteObj(&httpRoute.TypeMeta, httpRoute, output)
-	}
-	for i := range extensionPolicies.Items {
-		extensionPolicy := &extensionPolicies.Items[i]
-		mustWriteObj(&extensionPolicy.TypeMeta, extensionPolicy, output)
-	}
-	for i := range backends.Items {
-		backend := &backends.Items[i]
-		mustWriteObj(&backend.TypeMeta, backend, output)
-	}
-	for i := range httpRouteFilter.Items {
-		filter := &httpRouteFilter.Items[i]
-		mustWriteObj(&filter.TypeMeta, filter, output)
-	}
-	for i := range secrets.Items {
-		secret := &secrets.Items[i]
-		mustWriteObj(&secret.TypeMeta, secret, output)
-	}
-	for _, secret := range originalSecrets {
-		mustWriteObj(&secret.TypeMeta, secret, output)
-	}
-	for _, gateway := range originalGateways {
-		mustWriteObj(&gateway.TypeMeta, gateway, output)
-	}
-	for i := range backendTrafficPolicies.Items {
-		btp := &backendTrafficPolicies.Items[i]
-		mustWriteObj(&btp.TypeMeta, btp, output)
-	}
-	for i := range securityPolicies.Items {
-		sp := &securityPolicies.Items[i]
-		mustWriteObj(&sp.TypeMeta, sp, output)
-	}
-	return nil
-}
-
-// readYamlsAsString reads the files at the given paths and combines them into a single string.
-func readYamlsAsString(paths []string) (string, error) {
-	var buf strings.Builder
-	for _, path := range paths {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("error reading file %s: %w", path, err)
-		}
-		buf.Write(content)
-		buf.WriteString("\n---\n")
-	}
-	return buf.String(), nil
-}
 
 // collectObjects reads the YAML input and collects target resources. Currently, this will collect
 // AIGatewayRoute, AIServiceBackend, BackendSecurityPolicy, and Secret resources. Other resources
