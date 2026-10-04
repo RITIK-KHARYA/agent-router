@@ -998,6 +998,93 @@ func TestGatewayController_reconcileFilterConfigSecret_InvalidCELExpression(t *t
 	require.Contains(t, err.Error(), "invalid CEL expression")
 }
 
+// TestGatewayController_reconcileFilterConfigSecret_InvalidBodyMutation tests that an
+// AIServiceBackend with a bodyMutation whose Set value is not a valid JSON value causes
+// reconciliation to fail with a clear, field-attributed error (mirroring the invalid-CEL
+// behavior), rather than silently producing malformed request bodies on the request path.
+func TestGatewayController_reconcileFilterConfigSecret_InvalidBodyMutation(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-with-invalid-body-mutation", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "test-backend"}}},
+				},
+			},
+		},
+	}
+
+	// Create the backend with an invalid-JSON body mutation value (single-quoted object).
+	err := fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			BodyMutation: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "metadata", Value: "{key: \"value\"}"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	const someNamespace = "some-namespace"
+	_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to convert body mutation for backend test-backend")
+	require.Contains(t, err.Error(), `body mutation field "metadata"`)
+	require.Contains(t, err.Error(), "is not a valid JSON value")
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_ValidBodyMutation verifies that a
+// bodyMutation with valid JSON values reconciles successfully (no regression).
+func TestGatewayController_reconcileFilterConfigSecret_ValidBodyMutation(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: zapcore.DebugLevel})))
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-with-valid-body-mutation", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "test-backend"}}},
+				},
+			},
+		},
+	}
+
+	err := fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			BodyMutation: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "service_tier", Value: `"scale"`},
+					{Path: "max_tokens", Value: "100"},
+					{Path: "metadata", Value: `{"key": "value"}`},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	const someNamespace = "some-namespace"
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	require.NoError(t, err)
+	require.True(t, effective)
+}
+
 func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	kube := fake2.NewClientset()
@@ -3852,6 +3939,7 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 		name     string
 		input    *aigv1b1.HTTPBodyMutation
 		expected *filterapi.HTTPBodyMutation
+		wantErr  string // substring expected in the error, empty means no error
 	}{
 		{
 			name:     "nil input",
@@ -3936,11 +4024,54 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 				Remove: []string{},
 			},
 		},
+		{
+			name: "invalid json value: single quoted object",
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "metadata", Value: "{'k': 'v'}"},
+				},
+			},
+			wantErr: "body mutation field \"metadata\"",
+		},
+		{
+			name: "invalid json value: trailing comma",
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "metadata", Value: "{\"k\": \"v\",}"},
+				},
+			},
+			wantErr: "is not a valid JSON value",
+		},
+		{
+			name: "invalid json value: bad number",
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "max_tokens", Value: "1.5.2"},
+				},
+			},
+			wantErr: "body mutation field \"max_tokens\"",
+		},
+		{
+			name: "invalid json value: bare unquoted string is rejected at config time",
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "service_tier", Value: "premium"},
+				},
+			},
+			wantErr: "body mutation field \"service_tier\"",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := bodyMutationToFilterAPI(tt.input)
+			result, err := bodyMutationToFilterAPI(tt.input)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+				require.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
 			if tt.expected == nil {
 				require.Nil(t, result)
 				return

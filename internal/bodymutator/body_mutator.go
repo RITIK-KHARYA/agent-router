@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 type BodyMutator struct {
@@ -107,9 +108,22 @@ func (b *BodyMutator) Mutate(requestBody []byte) ([]byte, error) {
 	if len(b.bodyMutations.Set) > 0 {
 		for _, field := range b.bodyMutations.Set {
 			if field.Path != "" {
-				// Check value type to determine appropriate sjson method
-				// TODO handle JSON value check in configuration load time too.
+				// Check value type to determine appropriate sjson method.
+				// isJSONValue is a shallow prefix/suffix heuristic, so before embedding a
+				// value as raw JSON via sjson.SetRawBytes (whose SetRaw* contract is that
+				// the caller asserts the bytes are valid JSON), parse it to verify it really
+				// is a JSON value. Without this, a misclassified value such as `{key: "v"}`
+				// would be embedded verbatim and Mutate would return malformed JSON with
+				// err == nil, which extproc would then forward upstream. Configuration-load
+				// validation (filterapi.HTTPBodyMutation.Validate) rejects such values
+				// before any request is processed; this is the request-path backstop that
+				// guarantees no malformed JSON is ever emitted, regardless of how the
+				// mutation was constructed.
 				if isJSONValue(field.Value) {
+					var jsonValue any
+					if err = json.Unmarshal([]byte(field.Value), &jsonValue); err != nil {
+						return nil, fmt.Errorf("failed to set field %s: value %q is not a valid JSON value: %w", field.Path, field.Value, err)
+					}
 					// Use SetRawBytes for JSON values (quoted strings, numbers, booleans, objects, arrays)
 					mutatedBody, err = sjson.SetRawBytesOptions(mutatedBody, field.Path, []byte(field.Value), &sjson.Options{ReplaceInPlace: true})
 				} else {

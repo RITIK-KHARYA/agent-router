@@ -55,6 +55,54 @@ llmRequestCosts:
 	})
 }
 
+func TestUnmarshalConfigYaml_InvalidBodyMutation(t *testing.T) {
+	configPath := path.Join(t.TempDir(), "config.yaml")
+	// Backend with an invalid-JSON body mutation value (single-quoted object).
+	config := `
+backends:
+- name: bad-backend
+  schema:
+    name: OpenAI
+  httpBodyMutation:
+    set:
+    - path: metadata
+      value: '{key: "value"}'
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
+	_, err := filterapi.UnmarshalConfigYaml(configPath)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "bad-backend")
+	require.Contains(t, err.Error(), `body mutation field "metadata"`)
+	require.Contains(t, err.Error(), "is not a valid JSON value")
+}
+
+func TestUnmarshalConfigYaml_ValidBodyMutation(t *testing.T) {
+	configPath := path.Join(t.TempDir(), "config.yaml")
+	// Backend with valid JSON body mutation values.
+	config := `
+backends:
+- name: good-backend
+  schema:
+    name: OpenAI
+  httpBodyMutation:
+    set:
+    - path: service_tier
+      value: '"premium"'
+    - path: max_tokens
+      value: '42'
+    - path: metadata
+      value: '{"k": "v"}'
+    remove:
+    - internal_flag
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
+	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Backends, 1)
+	require.Equal(t, "good-backend", cfg.Backends[0].Name)
+	require.Equal(t, `"premium"`, cfg.Backends[0].BodyMutation.Set[0].Value)
+}
+
 func TestVersionedAPISchemaAnthropicPrefix(t *testing.T) {
 	require.Equal(t, "v1", filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic}.AnthropicPrefix())
 	require.Equal(t, "gateway/v1", filterapi.VersionedAPISchema{

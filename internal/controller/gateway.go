@@ -226,9 +226,13 @@ func headerValueFiltersToFilterAPI(filters []aigv1b1.HTTPHeaderValueFilter) []fi
 }
 
 // bodyMutationToFilterAPI converts an aigv1b1.HTTPBodyMutation to filterapi.HTTPBodyMutation.
-func bodyMutationToFilterAPI(m *aigv1b1.HTTPBodyMutation) *filterapi.HTTPBodyMutation {
+// It validates each Set field's Value is a valid JSON value and returns a clear,
+// field-attributed error on the first invalid value, so misconfigured body mutations are
+// rejected at reconcile time rather than silently producing malformed request bodies on
+// the request path.
+func bodyMutationToFilterAPI(m *aigv1b1.HTTPBodyMutation) (*filterapi.HTTPBodyMutation, error) {
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 	ret := &filterapi.HTTPBodyMutation{}
 	ret.Remove = make([]string, 0, len(m.Remove))
@@ -236,7 +240,10 @@ func bodyMutationToFilterAPI(m *aigv1b1.HTTPBodyMutation) *filterapi.HTTPBodyMut
 	for _, field := range m.Set {
 		ret.Set = append(ret.Set, filterapi.HTTPBodyField{Path: field.Path, Value: field.Value})
 	}
-	return ret
+	if err := ret.Validate(); err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 // validateCELExpression validates and returns a CEL expression for cost calculation.
@@ -549,7 +556,10 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 					backendBodyMutation := backendObj.Spec.BodyMutation
 					// Merge with route-level taking precedence over backend-level
 					mergedBodyMutation := mergeBodyMutations(routeBodyMutation, backendBodyMutation)
-					b.BodyMutation = bodyMutationToFilterAPI(mergedBodyMutation)
+					b.BodyMutation, err = bodyMutationToFilterAPI(mergedBodyMutation)
+					if err != nil {
+						return false, fmt.Errorf("failed to convert body mutation for backend %s in aigatewayroute %s: %w", backendRef.Name, aiGatewayRoute.Name, err)
+					}
 
 					b.Schema = schemaToFilterAPI(backendObj.Spec.APISchema)
 					b.HeaderValueFilters = headerValueFiltersToFilterAPI(backendObj.Spec.HeaderValueFilters)

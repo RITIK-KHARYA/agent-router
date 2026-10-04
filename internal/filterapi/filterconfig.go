@@ -12,6 +12,7 @@
 package filterapi
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 // Config is the configuration for the Envoy AI Gateway filter.
@@ -396,6 +398,30 @@ type HTTPBodyField struct {
 	Value string `json:"value"`
 }
 
+// Validate verifies that every Set field's Value is a valid JSON value, as required by the
+// documented contract above (and in api/v1beta1.AIGatewayRouteHTTPBodyField). It returns a
+// clear, field-attributed error for the first invalid value, so configuration ingestion
+// (CRD translation and file-based config) rejects misconfigured mutations early instead of
+// letting the request-path mutator silently embed raw bytes and forward malformed JSON
+// upstream (the mutator's isJSONValue heuristic is a shallow prefix/suffix check and does
+// not parse the value). Fields with an empty Path are skipped to match the mutator, which
+// ignores them.
+func (m *HTTPBodyMutation) Validate() error {
+	if m == nil {
+		return nil
+	}
+	for _, field := range m.Set {
+		if field.Path == "" {
+			continue
+		}
+		var jsonValue any
+		if err := json.Unmarshal([]byte(field.Value), &jsonValue); err != nil {
+			return fmt.Errorf("body mutation field %q: value %q is not a valid JSON value: %w", field.Path, field.Value, err)
+		}
+	}
+	return nil
+}
+
 // UnmarshalConfigYaml reads the file at the given path and unmarshals it into a Config struct.
 func UnmarshalConfigYaml(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
@@ -405,6 +431,12 @@ func UnmarshalConfigYaml(path string) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
+	}
+	for i := range cfg.Backends {
+		b := &cfg.Backends[i]
+		if err := b.BodyMutation.Validate(); err != nil {
+			return nil, fmt.Errorf("backend %q: %w", b.Name, err)
+		}
 	}
 	return &cfg, nil
 }

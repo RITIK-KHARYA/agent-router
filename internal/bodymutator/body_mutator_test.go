@@ -190,3 +190,31 @@ func TestBodyMutator_Mutate_InvalidJSONValue(t *testing.T) {
 	require.Equal(t, "not valid json but will be treated as string", result["service_tier"])
 	require.Equal(t, "valid", result["valid_field"])
 }
+
+// TestBodyMutator_Mutate_MisclassifiedInvalidJSON is the request-path backstop: when
+// isJSONValue misclassifies a non-JSON string as a JSON literal (single-quoted objects,
+// unquoted keys, trailing commas, or invalid number-like strings), Mutate must return a
+// clear error rather than embedding the raw bytes via sjson.SetRawBytes and forwarding
+// malformed JSON upstream with err == nil. These values are also rejected at
+// configuration ingestion (filterapi.HTTPBodyMutation.Validate); this test guards direct
+// callers that construct a mutation without going through config validation.
+func TestBodyMutator_Mutate_MisclassifiedInvalidJSON(t *testing.T) {
+	cases := []string{
+		`{'k': 'v'}`,
+		`{"k": "v",}`,
+		`{key: "value"}`,
+		`1.5.2`,
+	}
+	for _, v := range cases {
+		t.Run(v, func(t *testing.T) {
+			m := NewBodyMutator(&filterapi.HTTPBodyMutation{
+				Set: []filterapi.HTTPBodyField{{Path: "x", Value: v}},
+			}, []byte("{}"))
+			out, err := m.Mutate([]byte(`{"a":1}`))
+			require.Error(t, err, "value=%q must produce an error, not silent malformed JSON", v)
+			require.Contains(t, err.Error(), "failed to set field x")
+			require.Contains(t, err.Error(), "is not a valid JSON value")
+			require.Nil(t, out, "value=%q: Mutate must not return a (malformed) body on error", v)
+		})
+	}
+}
