@@ -112,7 +112,7 @@ func (t *cohereToCohereTranslatorV2Rerank) ResponseBody(_ map[string]string, bod
 func (t *cohereToCohereTranslatorV2Rerank) ResponseError(respHeaders map[string]string, body io.Reader) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
-	if v, ok := respHeaders[contentTypeHeaderName]; ok && !strings.Contains(v, jsonContentType) {
+	if v, ok := respHeaders[contentTypeHeaderName]; !ok || !strings.Contains(v, jsonContentType) {
 		buf, err := io.ReadAll(body)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
