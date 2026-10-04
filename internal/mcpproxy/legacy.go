@@ -1221,6 +1221,15 @@ func (m *mcpRequestContext) handlePromptGetRequest(ctx context.Context, s *sessi
 }
 
 func (m *mcpRequestContext) handleCompletionComplete(ctx context.Context, s *session, w http.ResponseWriter, req *jsonrpc.Request, param *mcp.CompleteParams, span tracingapi.MCPSpan) (handlerResult, error) {
+	// parseParamsAndMaybeStartSpan leaves CompleteParams.Ref == nil when the client omits
+	// params, omits ref, or sends "ref": null (the SDK's CompleteParams has no custom
+	// UnmarshalJSON, so default encoding/json rules leave the pointer field nil). Guard
+	// the dereference to avoid a nil-pointer panic that would tear the connection down
+	// without a response; mirror the SDK's Server.complete check and reject as 400.
+	if param == nil || param.Ref == nil {
+		onErrorResponse(w, http.StatusBadRequest, "missing ref in completion/complete params")
+		return handlerResult{}, errors.New("missing ref in completion/complete params")
+	}
 	// Either one of Name or URI is non-empty, depending on the Ref.Type.
 	// https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/completion#reference-types
 	var (
@@ -1232,6 +1241,9 @@ func (m *mcpRequestContext) handleCompletionComplete(ctx context.Context, s *ses
 		backendName, param.Ref.Name, err = m.resolvePromptBackend(s.route, param.Ref.Name)
 	case "ref/resource":
 		backendName, param.Ref.URI, err = upstreamResourceURI(param.Ref.URI)
+	default:
+		onErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("unrecognized ref type: %s", param.Ref.Type))
+		return handlerResult{}, fmt.Errorf("unrecognized ref type: %s", param.Ref.Type)
 	}
 	if err != nil {
 		onErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid resource name %s: %v", cmp.Or(param.Ref.Name, param.Ref.URI), err))

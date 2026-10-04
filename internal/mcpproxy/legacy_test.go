@@ -1439,6 +1439,106 @@ func TestMCPProxy_handleCompletionComplete_NoSession(t *testing.T) {
 	require.Empty(t, span.backends, "must not record a route-to-backend span for a backend with no session")
 }
 
+// TestMCPProxy_handleCompletionComplete_MissingRef covers the malformed-params variants
+// that used to reach `switch param.Ref.Type` with param.Ref == nil and panic. Each must
+// now return 400 Bad Request without panicking and without recording a route-to-backend
+// span. Mirrors the nil-Ref guard the Go SDK has in Server.complete.
+func TestMCPProxy_handleCompletionComplete_MissingRef(t *testing.T) {
+	proxy := newTestMCPProxy()
+	reqID, _ := jsonrpc.MakeID("id")
+	s := &session{
+		reqCtx: proxy,
+		perBackendSessions: map[filterapi.MCPBackendName]*compositeSessionEntry{
+			"backend1": {sessionID: "test-session"},
+		},
+		route: "test-route",
+	}
+
+	for _, tc := range []struct {
+		name  string
+		param *mcp.CompleteParams
+	}{
+		{name: "nil params", param: nil},
+		{name: "empty params with nil ref", param: &mcp.CompleteParams{}},
+		{name: "explicit nil ref after unmarshal", param: &mcp.CompleteParams{Ref: nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			span := &fakeSpan{}
+			var err error
+			require.NotPanics(t, func() {
+				_, err = proxy.handleCompletionComplete(t.Context(), s, rr,
+					&jsonrpc.Request{ID: reqID, Method: "completion/complete"}, tc.param, span)
+			})
+			require.Error(t, err)
+			require.Equal(t, http.StatusBadRequest, rr.Code)
+			require.Contains(t, rr.Body.String(), "missing ref in completion/complete params")
+			require.Empty(t, span.backends, "must not record a route-to-backend span for a malformed request")
+		})
+	}
+}
+
+// TestMCPProxy_handleCompletionComplete_UnrecognizedRefType covers a non-nil ref with an
+// unrecognized type. Before the fix this fell through the switch with backendName="" and
+// err=nil, producing a misleading 404 "unknown backend"; it must now return 400.
+func TestMCPProxy_handleCompletionComplete_UnrecognizedRefType(t *testing.T) {
+	proxy := newTestMCPProxy()
+	reqID, _ := jsonrpc.MakeID("id")
+	rr := httptest.NewRecorder()
+	span := &fakeSpan{}
+	_, err := proxy.handleCompletionComplete(t.Context(), &session{
+		reqCtx: proxy,
+		perBackendSessions: map[filterapi.MCPBackendName]*compositeSessionEntry{
+			"backend1": {sessionID: "test-session"},
+		},
+		route: "test-route",
+	}, rr, &jsonrpc.Request{ID: reqID, Method: "completion/complete"}, &mcp.CompleteParams{
+		Ref: &mcp.CompleteReference{Type: "ref/unknown"},
+	}, span)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unrecognized ref type: ref/unknown")
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "unrecognized ref type: ref/unknown")
+	require.Empty(t, span.backends)
+}
+
+// TestServePOST_CompletionCompleteMissingRef exercises the three malformed
+// completion/complete payloads through the full servePOST dispatcher. Each used to panic
+// (because parseParamsAndMaybeStartSpan leaves CompleteParams.Ref == nil without error);
+// each must now produce a clean 400 without panicking.
+func TestServePOST_CompletionCompleteMissingRef(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "no params field",
+			body: `{"jsonrpc":"2.0","id":1,"method":"completion/complete"}`,
+		},
+		{
+			name: "params omit ref",
+			body: `{"jsonrpc":"2.0","id":1,"method":"completion/complete","params":{"argument":{"name":"k","value":"v"}}}`,
+		},
+		{
+			name: "params ref null",
+			body: `{"jsonrpc":"2.0","id":1,"method":"completion/complete","params":{"argument":{"name":"k","value":"v"},"ref":null}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := newTestMCPProxy()
+			httpReq := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@backend1:dGVzdC1zZXNzaW9u")) // "test-session" base64 encoded.
+			httpReq.Header.Set(internalapi.MCPRouteHeader, "test-route")
+
+			rr := httptest.NewRecorder()
+			require.NotPanics(t, func() { proxy.servePOST(rr, httpReq) })
+			require.Equal(t, http.StatusBadRequest, rr.Code)
+			require.Contains(t, rr.Body.String(), "missing ref in completion/complete params")
+		})
+	}
+}
+
 func TestMCPProxy_handlePing(t *testing.T) {
 	reqID, _ := jsonrpc.MakeID("id")
 
