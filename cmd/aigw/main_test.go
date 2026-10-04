@@ -229,11 +229,11 @@ func TestCmd_BeforeApply(t *testing.T) {
 			dataHome:        "",
 			stateHome:       "",
 			runtimeDir:      "",
-			envVars:         map[string]string{"HOME": "/home/test", "UID": "1000"},
+			envVars:         map[string]string{"HOME": "/home/test"},
 			expectedConfig:  "/home/test/.config/aigw",
 			expectedData:    "/home/test/.local/share/aigw",
 			expectedState:   "/home/test/.local/state/aigw",
-			expectedRuntime: "/tmp/aigw-1000",
+			expectedRuntime: fmt.Sprintf("/tmp/aigw-%d", os.Getuid()),
 		},
 		{
 			name:            "preserves explicit values",
@@ -252,11 +252,28 @@ func TestCmd_BeforeApply(t *testing.T) {
 			dataHome:        "",
 			stateHome:       "/custom/state",
 			runtimeDir:      "",
-			envVars:         map[string]string{"HOME": "/home/test", "UID": "1000"},
+			envVars:         map[string]string{"HOME": "/home/test"},
 			expectedConfig:  "/custom/config",
 			expectedData:    "/home/test/.local/share/aigw",
 			expectedState:   "/custom/state",
-			expectedRuntime: "/tmp/aigw-1000",
+			expectedRuntime: fmt.Sprintf("/tmp/aigw-%d", os.Getuid()),
+		},
+		{
+			// Regression guard: the runtime dir must be derived from the
+			// kernel-reported UID (os.Getuid), NOT the $UID env var. $UID is a
+			// non-exported bash shell variable that is absent from the process
+			// environment in production. If the default relied on $UID again,
+			// setting UID=999 here would produce "/tmp/aigw-999".
+			name:            "ignores UID env var and uses kernel uid",
+			configHome:      "",
+			dataHome:        "",
+			stateHome:       "",
+			runtimeDir:      "",
+			envVars:         map[string]string{"HOME": "/home/test", "UID": "999"},
+			expectedConfig:  "/home/test/.config/aigw",
+			expectedData:    "/home/test/.local/share/aigw",
+			expectedState:   "/home/test/.local/state/aigw",
+			expectedRuntime: fmt.Sprintf("/tmp/aigw-%d", os.Getuid()),
 		},
 	}
 
