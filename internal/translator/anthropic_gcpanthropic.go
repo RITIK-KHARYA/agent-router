@@ -30,7 +30,6 @@ type anthropicToGCPAnthropicTranslator struct {
 	anthropicToAnthropicTranslator
 	apiVersion        string
 	modelNameOverride internalapi.ModelNameOverride
-	requestModel      internalapi.RequestModel
 	anthropicBetas    []string
 	betaFilterMode    string
 	betaFilterValues  []string
