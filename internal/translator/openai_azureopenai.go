@@ -6,6 +6,7 @@
 package translator
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,13 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
+
+// errAzureOpenAIAPIVersionRequired is returned when an Azure OpenAI translator is invoked
+// without a configured api-version. Azure OpenAI requires a non-empty "api-version" query
+// parameter on every request; without a guard the translators would silently embed an empty
+// value (e.g. "...?api-version=") into the upstream :path, which Azure rejects at runtime
+// with an opaque error instead of failing fast at configuration time.
+var errAzureOpenAIAPIVersionRequired = errors.New("azure openai translator requires a non-empty api version")
 
 // NewChatCompletionOpenAIToAzureOpenAITranslator implements [Factory] for OpenAI to Azure OpenAI translations.
 // Except RequestBody method requires modification to satisfy Microsoft Azure OpenAI spec
@@ -49,6 +57,9 @@ type openAIToAzureOpenAITranslatorV1ChatCompletion struct {
 func (o *openAIToAzureOpenAITranslatorV1ChatCompletion) RequestBody(raw []byte, req *openai.ChatCompletionRequest, forceBodyMutation bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
+	if o.apiVersion == "" {
+		return nil, nil, errAzureOpenAIAPIVersionRequired
+	}
 	modelName := req.Model
 	if o.modelNameOverride != "" {
 		// If modelName is set we override the model to be used for the request.
@@ -83,6 +94,9 @@ type openAIToAzureOpenAITranslatorV1Responses struct {
 func (o *openAIToAzureOpenAITranslatorV1Responses) RequestBody(raw []byte, req *openai.ResponseRequest, forceBodyMutation bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
+	if o.apiVersion == "" {
+		return nil, nil, errAzureOpenAIAPIVersionRequired
+	}
 	newHeaders, newBody, err = o.openAIToOpenAITranslatorV1Responses.RequestBody(raw, req, forceBodyMutation)
 	if err != nil {
 		return nil, nil, err

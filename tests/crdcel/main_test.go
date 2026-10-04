@@ -99,6 +99,10 @@ func TestAIServiceBackends(t *testing.T) {
 		{name: "aws-openai-schema.yaml"},
 		{name: "basic-eg-backend-azure.yaml"},
 		{
+			name:   "azure-openai-no-version.yaml",
+			expErr: "version is required for the AzureOpenAI schema",
+		},
+		{
 			name:   "unknown_schema.yaml",
 			expErr: "spec.schema.name: Unsupported value: \"SomeRandomVendor\": supported values: \"OpenAI\", \"Cohere\", \"AWSBedrock\", \"AzureOpenAI\", \"GCPVertexAI\", \"GCPAnthropic\", \"Anthropic\"",
 		},

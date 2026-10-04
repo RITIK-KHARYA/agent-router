@@ -365,6 +365,9 @@ spec:
                 required:
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: version is required for the AzureOpenAI schema
+                  rule: self.name != 'AzureOpenAI' || has(self.version)
             required:
             - backendRef
             - schema
@@ -835,6 +838,9 @@ spec:
                 required:
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: version is required for the AzureOpenAI schema
+                  rule: self.name != 'AzureOpenAI' || has(self.version)
             required:
             - backendRef
             - schema

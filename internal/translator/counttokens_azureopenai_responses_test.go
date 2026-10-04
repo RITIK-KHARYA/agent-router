@@ -85,3 +85,16 @@ func TestResponsesInputTokensOpenAIToAzure_RequestBody(t *testing.T) {
 		})
 	}
 }
+
+// TestResponsesInputTokensOpenAIToAzure_EmptyAPIVersion verifies that the Azure OpenAI
+// input-tokens translator fails fast when constructed without an api-version, rather
+// than silently emitting a malformed "?api-version=" query parameter.
+func TestResponsesInputTokensOpenAIToAzure_EmptyAPIVersion(t *testing.T) {
+	tr := NewResponsesInputTokensOpenAIToAzureOpenAITranslator("", "")
+	require.NotNil(t, tr)
+	hm, bm, err := tr.RequestBody([]byte(`{"model":"gpt-4.1","input":"hi"}`), &openai.ResponseRequest{Model: "gpt-4.1"}, false)
+	require.ErrorIs(t, err, errAzureOpenAIAPIVersionRequired)
+	require.ErrorContains(t, err, "api version")
+	require.Nil(t, hm)
+	require.Nil(t, bm)
+}

@@ -12,6 +12,8 @@ package v1alpha1
 //
 // Note that this is vendor specific, and the stability of the API schema is not guaranteed by
 // the ai-gateway, but by the vendor via proper versioning.
+//
+// +kubebuilder:validation:XValidation:rule="self.name != 'AzureOpenAI' || has(self.version)",message="version is required for the AzureOpenAI schema"
 type VersionedAPISchema struct {
 	// Name is the name of the API schema of the AIGatewayRoute or AIServiceBackend.
 	//

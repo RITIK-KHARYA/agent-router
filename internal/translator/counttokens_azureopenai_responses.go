@@ -30,6 +30,9 @@ type openAIToAzureOpenAITranslatorV1ResponsesInputTokens struct {
 func (o *openAIToAzureOpenAITranslatorV1ResponsesInputTokens) RequestBody(raw []byte, req *openai.ResponseRequest, forceBodyMutation bool) (
 	newHeaders []internalapi.Header, newBody []byte, err error,
 ) {
+	if o.apiVersion == "" {
+		return nil, nil, errAzureOpenAIAPIVersionRequired
+	}
 	newHeaders, newBody, err = o.responsesInputTokensToOpenAITranslator.RequestBody(raw, req, forceBodyMutation)
 	if err != nil {
 		return nil, nil, err
