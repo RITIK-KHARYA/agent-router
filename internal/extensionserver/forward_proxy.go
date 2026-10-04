@@ -9,11 +9,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	http11proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/http_11_proxy/v3"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 )
@@ -33,9 +35,11 @@ const (
 // forward proxy. This routes upstream egress through an HTTP CONNECT proxy while preserving the
 // original (TLS) transport nested inside the wrapper.
 //
-// It is a no-op when no forward proxy is configured for the route's Gateway(s).
-func (s *Server) maybeWrapClusterInForwardProxy(ctx context.Context, cluster *clusterv3.Cluster, route *aigv1b1.AIGatewayRoute) error {
-	addr, err := s.resolveForwardProxyAddr(ctx, route)
+// snapshotOwners are the Gateways owning the xDS snapshot being translated (from gatewaysInSnapshot);
+// only those of the route's ParentRefs that own this snapshot influence proxy selection. It is a
+// no-op when no forward proxy is configured for the owning Gateway(s).
+func (s *Server) maybeWrapClusterInForwardProxy(ctx context.Context, cluster *clusterv3.Cluster, route *aigv1b1.AIGatewayRoute, snapshotOwners []client.ObjectKey) error {
+	addr, err := s.resolveForwardProxyAddr(ctx, route, snapshotOwners)
 	if err != nil {
 		return err
 	}
@@ -49,12 +53,25 @@ func (s *Server) maybeWrapClusterInForwardProxy(ctx context.Context, cluster *cl
 	return wrapClusterInForwardProxy(cluster, proxyAddress)
 }
 
-// resolveForwardProxyAddr returns the forward proxy "host:port" configured on the GatewayConfig
-// referenced by any of the route's parent Gateways, or "" if none is configured.
+// resolveForwardProxyAddr returns the forward proxy "host:port" configured on the GatewayConfig of
+// the route's parent Gateway(s) that own this xDS snapshot, or "" if none configures one.
 //
-// If multiple parent Gateways resolve conflicting proxy addresses, the first one found is used
-// and a warning is logged.
-func (s *Server) resolveForwardProxyAddr(ctx context.Context, route *aigv1b1.AIGatewayRoute) (string, error) {
+// snapshotOwners are the Gateways owning the snapshot (from gatewaysInSnapshot). Only the route's
+// ParentRefs matching one of them are consulted, so each snapshot's egress is tunneled through its
+// own owning Gateway's forward proxy. A multi-parent route no longer routes every snapshot through
+// the first-listed parent's proxy.
+//
+// Under mergeGateways a snapshot can have multiple owners. A forward proxy is a single address, so
+// the per-owner declarations cannot be unioned (unlike metadataForwardingNamespaces): when merged
+// owners configure conflicting addresses the conflict is surfaced as an error rather than silently
+// picking one, which would reproduce this bug for the merged case. Owners sharing the same address
+// are accepted.
+func (s *Server) resolveForwardProxyAddr(ctx context.Context, route *aigv1b1.AIGatewayRoute, snapshotOwners []client.ObjectKey) (string, error) {
+	// When the snapshot's owning Gateway cannot be identified, no proxy is selected. This mirrors
+	// metadataForwardingNamespacesForSnapshot, which forwards nothing under the same condition.
+	if len(snapshotOwners) == 0 {
+		return "", nil
+	}
 	var resolved string
 	for i := range route.Spec.ParentRefs {
 		parentRef := &route.Spec.ParentRefs[i]
@@ -66,6 +83,11 @@ func (s *Server) resolveForwardProxyAddr(ctx context.Context, route *aigv1b1.AIG
 		if parentRef.Namespace != nil {
 			gwNamespace = string(*parentRef.Namespace)
 		}
+		// Narrow to the parent(s) that own this snapshot; a route's other parents belong to other
+		// snapshots and must not influence this one's egress.
+		if !slices.Contains(snapshotOwners, client.ObjectKey{Name: string(parentRef.Name), Namespace: gwNamespace}) {
+			continue
+		}
 		addr, err := s.forwardProxyAddrForGateway(ctx, string(parentRef.Name), gwNamespace)
 		if err != nil {
 			return "", err
@@ -76,8 +98,7 @@ func (s *Server) resolveForwardProxyAddr(ctx context.Context, route *aigv1b1.AIG
 		if resolved == "" {
 			resolved = addr
 		} else if resolved != addr {
-			s.log.Info("multiple parent Gateways configure different forward proxies; using the first",
-				"route", route.Name, "namespace", route.Namespace, "using", resolved, "ignored", addr)
+			return "", fmt.Errorf("snapshot-owning Gateways configure conflicting forward proxy addresses: %q and %q", resolved, addr)
 		}
 	}
 	return resolved, nil

@@ -113,9 +113,14 @@ func hasAIGatewayClusterName(cluster *clusterv3.Cluster) bool {
 func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostTranslateModifyRequest) (*egextension.PostTranslateModifyResponse, error) {
 	var extProcUDSExist bool
 
-	// Resolved once per snapshot: the namespaces are the Gateway's and apply to every AI cluster.
-	var metadataForwardingNamespaces []string
+	// Resolved once per snapshot: the Gateways owning this snapshot scope per-Gateway settings to
+	// the snapshot's owner. Both the metadata forwarding namespaces and the forward proxy use it.
+	var (
+		metadataForwardingNamespaces []string
+		snapshotOwners               []client.ObjectKey
+	)
 	if slices.ContainsFunc(req.Clusters, hasAIGatewayClusterName) {
+		snapshotOwners = gatewaysInSnapshot(req.Routes)
 		var nsErr error
 		if metadataForwardingNamespaces, nsErr = s.metadataForwardingNamespacesForSnapshot(ctx, req.Routes); nsErr != nil {
 			return nil, fmt.Errorf("failed to resolve the metadata forwarding namespaces: %w", nsErr)
@@ -124,7 +129,7 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostT
 
 	// Process existing clusters - may add metadata or modify configurations.
 	for _, cluster := range req.Clusters {
-		if err := s.maybeModifyCluster(ctx, cluster, metadataForwardingNamespaces); err != nil {
+		if err := s.maybeModifyCluster(ctx, cluster, metadataForwardingNamespaces, snapshotOwners); err != nil {
 			return nil, fmt.Errorf("failed to modify cluster %s: %w", cluster.Name, err)
 		}
 		extProcUDSExist = extProcUDSExist || cluster.Name == extProcUDSClusterName
@@ -323,7 +328,7 @@ func (s *Server) retrieveAndCacheAIGatewayRoute(ctx context.Context, cache map[c
 //
 // The resulting configuration is similar to the envoy.yaml files in tests/data-plane/.
 // Only clusters with names matching the AIGatewayRoute pattern are modified.
-func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster, metadataForwardingNamespaces []string) error {
+func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster, metadataForwardingNamespaces []string, snapshotOwners []client.ObjectKey) error {
 	clusterName, err := parseAIGatewayClusterName(cluster.Name)
 	if err != nil {
 		s.log.Info("non-ai-gateway cluster name", "cluster_name", cluster.Name, "error", err)
@@ -449,7 +454,7 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 	// configures one. InferencePool clusters use in-cluster ORIGINAL_DST endpoints, so they are
 	// excluded.
 	if pool == nil {
-		if err = s.maybeWrapClusterInForwardProxy(ctx, cluster, &aigwRoute); err != nil {
+		if err = s.maybeWrapClusterInForwardProxy(ctx, cluster, &aigwRoute, snapshotOwners); err != nil {
 			return fmt.Errorf("failed to configure forward proxy for cluster %s: %w", cluster.Name, err)
 		}
 	}
