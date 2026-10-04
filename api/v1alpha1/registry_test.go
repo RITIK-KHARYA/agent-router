@@ -62,52 +62,6 @@ func TestResource(t *testing.T) {
 	}
 }
 
-func TestAddKnownTypes(t *testing.T) {
-	t.Run("AddKnownTypes registers all types", func(t *testing.T) {
-		scheme := runtime.NewScheme()
-		err := AddKnownTypes(scheme)
-		require.NoError(t, err)
-
-		// Get all registered types
-		types := scheme.KnownTypes(SchemeGroupVersion)
-
-		// Verify all resource types are registered
-		expectedTypes := []string{
-			"AIGatewayRoute",
-			"AIGatewayRouteList",
-			"AIServiceBackend",
-			"AIServiceBackendList",
-			"BackendSecurityPolicy",
-			"BackendSecurityPolicyList",
-			"MCPRoute",
-			"MCPRouteList",
-		}
-
-		for _, typeName := range expectedTypes {
-			assert.Contains(t, types, typeName, "Type %s should be registered", typeName)
-		}
-
-		// Verify we have the expected number of types (8 custom types)
-		assert.GreaterOrEqual(t, len(types), 8, "Should have at least 8 registered types")
-	})
-
-	t.Run("AddKnownTypes can be called multiple times", func(t *testing.T) {
-		scheme := runtime.NewScheme()
-
-		// First call
-		err := AddKnownTypes(scheme)
-		require.NoError(t, err)
-
-		// Second call should also work without error
-		err = AddKnownTypes(scheme)
-		require.NoError(t, err)
-
-		// Verify types are still registered
-		types := scheme.KnownTypes(SchemeGroupVersion)
-		assert.Contains(t, types, "AIGatewayRoute")
-	})
-}
-
 func TestAddToScheme(t *testing.T) {
 	t.Run("AddToScheme registers all types", func(t *testing.T) {
 		scheme := runtime.NewScheme()
