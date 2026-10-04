@@ -7,53 +7,12 @@ package filterapi_test
 
 import (
 	"log/slog"
-	"os"
-	"path"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 )
-
-func TestUnmarshalConfigYaml(t *testing.T) {
-	configPath := path.Join(t.TempDir(), "config.yaml")
-	config := `
-schema:
-  name: OpenAI
-llmRequestCosts:
-- metadataKey: token_usage_key
-  routeName: ns/my-route
-  type: OutputToken
-`
-	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
-	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
-	require.NoError(t, err)
-
-	expectedCfg := &filterapi.Config{
-		LLMRequestCosts: []filterapi.LLMRequestCost{
-			{
-				MetadataKey: "token_usage_key",
-				RouteName:   "ns/my-route",
-				Type:        filterapi.LLMRequestCostTypeOutputToken,
-			},
-		},
-	}
-
-	require.Equal(t, expectedCfg, cfg)
-
-	t.Run("not found", func(t *testing.T) {
-		_, err := filterapi.UnmarshalConfigYaml("not-found.yaml")
-		require.Error(t, err)
-		require.True(t, os.IsNotExist(err))
-	})
-	t.Run("invalid", func(t *testing.T) {
-		const invalidConfig = `{wefaf3q20,9u,f02`
-		require.NoError(t, os.WriteFile(configPath, []byte(invalidConfig), 0o600))
-		_, err := filterapi.UnmarshalConfigYaml(configPath)
-		require.Error(t, err)
-	})
-}
 
 func TestVersionedAPISchemaAnthropicPrefix(t *testing.T) {
 	require.Equal(t, "v1", filterapi.VersionedAPISchema{Name: filterapi.APISchemaAnthropic}.AnthropicPrefix())
