@@ -1237,16 +1237,21 @@ data: {"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCoun
 `,
 		},
 		{
+			// AWS Bedrock InvokeModel returns AWS service exceptions (BedrockException) for errors,
+			// not Anthropic-shaped errors: JSON body {"message":"..."} with the exception type in
+			// the x-amzn-errortype header. The translator must convert this to the Anthropic
+			// {"type":"error","error":{"type":...}} shape, mapping error.type from the HTTP status.
 			name:            "aws-anthropic - /anthropic/v1/messages - error response",
 			backend:         "aws-anthropic",
 			path:            "/anthropic/v1/messages",
 			method:          http.MethodPost,
 			requestBody:     `{"model":"anthropic.claude-3-sonnet-20240229-v1:0","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"Test error"}]}]}`,
 			expPath:         "/model/anthropic.claude-3-sonnet-20240229-v1:0/invoke",
+			responseHeaders: "content-type:application/json,x-amzn-errortype:ValidationException",
 			responseStatus:  strconv.Itoa(http.StatusBadRequest),
-			responseBody:    `{"type":"error","error":{"type":"validation_error","message":"Invalid request format"}}`,
+			responseBody:    `{"message":"messages: field is required"}`,
 			expStatus:       http.StatusBadRequest,
-			expResponseBody: `{"type":"error","error":{"type":"validation_error","message":"Invalid request format"}}`,
+			expResponseBody: `{"type":"error","error":{"type":"invalid_request_error","message":"messages: field is required"},"request_id":""}`,
 		},
 		{
 			name:            "aws-bedrock - /anthropic/v1/messages",

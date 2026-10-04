@@ -18,6 +18,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -260,5 +261,83 @@ func (a *anthropicToAWSAnthropicTranslator) convertMessagesEventWrappedInAmazonE
 		*out = append(*out, rawEvent.Bytes...)
 		*out = append(*out, '\n', '\n')
 		lastRead = r.Size() - int64(r.Len())
+	}
+}
+
+// ResponseError implements [AnthropicMessagesTranslator.ResponseError].
+//
+// AWS Bedrock InvokeModel returns AWS service exceptions (awsbedrock.BedrockException) for every
+// error response: a JSON body {"message":"..."} carrying the error message, with the exception
+// type in the x-amzn-errortype header and the status code in :status. It never returns the
+// Anthropic {"type":"error","error":{...}} shape. The embedded anthropicToAnthropicTranslator
+// treats JSON error bodies as already-Anthropic-shaped and returns them unchanged (correct for a
+// real Anthropic upstream, but wrong for AWS Bedrock), so this translator overrides ResponseError
+// to convert the AWS error body into an anthropicschema.ErrorResponse.
+//
+// This mirrors the OpenAI sibling for the same backend (openai_awsanthropic.go) and the Anthropic
+// to AWS Bedrock Converse translator (anthropic_awsbedrock.go), both of which decode
+// awsbedrock.BedrockException. See https://docs.anthropic.com/en/api/errors for the target shape.
+func (a *anthropicToAWSAnthropicTranslator) ResponseError(respHeaders map[string]string, body io.Reader) (
+	newHeaders []internalapi.Header, mutatedBody []byte, err error,
+) {
+	var errorMessage string
+	if v, ok := respHeaders[contentTypeHeaderName]; ok && strings.Contains(v, jsonContentType) {
+		var bedrockError awsbedrock.BedrockException
+		if err = json.NewDecoder(body).Decode(&bedrockError); err != nil {
+			return nil, nil, fmt.Errorf("failed to unmarshal error body: %w", err)
+		}
+		errorMessage = bedrockError.Message
+	} else {
+		var buf []byte
+		buf, err = io.ReadAll(body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+		}
+		errorMessage = string(buf)
+	}
+	anthropicError := anthropicschema.ErrorResponse{
+		Type: "error",
+		Error: anthropicschema.ErrorResponseMessage{
+			Type:    httpStatusToAnthropicErrorType(respHeaders[statusHeaderName]),
+			Message: errorMessage,
+		},
+	}
+	mutatedBody, err = json.Marshal(anthropicError)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+	}
+	newHeaders = []internalapi.Header{
+		{contentTypeHeaderName, jsonContentType},
+		{contentLengthHeaderName, strconv.Itoa(len(mutatedBody))},
+	}
+	return
+}
+
+// httpStatusToAnthropicErrorType maps an HTTP status code to the Anthropic API error.type
+// discriminator per https://docs.anthropic.com/en/api/errors. The 500/default cases resolve to
+// "api_error" as documented, which the inherited anthropicToAnthropicTranslator and the Converse
+// sibling both incorrectly map to "internal_server_error".
+func httpStatusToAnthropicErrorType(statusCode string) string {
+	switch statusCode {
+	case "400":
+		return "invalid_request_error"
+	case "401":
+		return "authentication_error"
+	case "403":
+		return "permission_error"
+	case "404":
+		return "not_found_error"
+	case "413":
+		return "request_too_large"
+	case "429":
+		return "rate_limit_error"
+	case "500":
+		return "api_error"
+	case "503":
+		return "service_unavailable_error"
+	case "529":
+		return "overloaded_error"
+	default:
+		return "api_error"
 	}
 }
