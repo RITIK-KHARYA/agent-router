@@ -781,3 +781,96 @@ data: {"type": "message_stop"}
 	assert.True(t, cacheCreationSet, "cache creation tokens should be set")
 	assert.Equal(t, uint32(1), cacheCreationTokens, "No cache creation tokens in this scenario")
 }
+
+// TestAnthropicToGCPAnthropicTranslator_ResponseBody_NonStreamingResponseModelFallback
+// guards against a field-shadowing regression where the GCP wrapper redeclared
+// `requestModel`, so the inherited anthropicToAnthropicTranslator.ResponseBody read an
+// embedded (never-written) field and the cmp.Or(upstreamModel, requestModel) fallback
+// returned "" instead of the request model when an upstream omitted `model`.
+//
+// Pre-fix: this returned "".
+// Post-fix: RequestBody writes resolve (via promotion) to the embedded parent's
+// requestModel, which ResponseBody reads.
+func TestAnthropicToGCPAnthropicTranslator_ResponseBody_NonStreamingResponseModelFallback(t *testing.T) {
+	const requestModel = "claude-3-haiku-20240307"
+	translator := NewAnthropicToGCPAnthropicTranslator("vertex-2023-10-16", "")
+	req := &anthropic.MessagesRequest{
+		Model:     requestModel,
+		MaxTokens: 1024,
+		Messages: []anthropic.MessageParam{
+			{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, _, err = translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	// Well-formed Anthropic JSON that simply omits the `model` key (a spec-violating
+	// upstream). This is the only input shape that reaches the non-streaming fallback —
+	// truncated JSON fails to decode and returns early before the cmp.Or.
+	respBody := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
+	_, _, _, responseModel, err := translator.ResponseBody(nil, strings.NewReader(respBody), false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, requestModel, responseModel)
+}
+
+// TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingResponseModelFallback
+// guards the streaming path against the same field-shadowing regression. A
+// `message_start` chunk whose `message` object is present but omits `model` leaves
+// streamingResponseModel empty, so the inherited fallback cmp.Or(streamingResponseModel,
+// requestModel) must return the request model.
+func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingResponseModelFallback(t *testing.T) {
+	const requestModel = "claude-3-haiku-20240307"
+	translator := NewAnthropicToGCPAnthropicTranslator("vertex-2023-10-16", "")
+	req := &anthropic.MessagesRequest{
+		Model:     requestModel,
+		MaxTokens: 1024,
+		Stream:    true,
+		Messages: []anthropic.MessageParam{
+			{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, _, err = translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+	require.True(t, translator.(*anthropicToGCPAnthropicTranslator).stream, "stream flag must propagate to the embedded parent")
+
+	chunk := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n"
+	_, _, _, responseModel, err := translator.ResponseBody(nil, strings.NewReader(chunk), false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, requestModel, responseModel)
+}
+
+// TestAnthropicToGCPAnthropicTranslator_ResponseBody_ModelNameOverrideFallback verifies
+// that when a model name override is configured, the override value (not the original
+// request model) is what the inherited ResponseBody fallback returns when the upstream
+// omits `model`. The override writes a.requestModel in RequestBody, which must resolve
+// (via promotion) to the embedded parent's field that ResponseBody reads.
+func TestAnthropicToGCPAnthropicTranslator_ResponseBody_ModelNameOverrideFallback(t *testing.T) {
+	const override = "claude-3-sonnet-override"
+	translator := NewAnthropicToGCPAnthropicTranslator("vertex-2023-10-16", override)
+	req := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku-20240307",
+		MaxTokens: 1024,
+		Messages: []anthropic.MessageParam{
+			{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}},
+		},
+	}
+	rawBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, _, err = translator.RequestBody(rawBody, req, false)
+	require.NoError(t, err)
+
+	// Request-path URL is built from a.requestModel too; confirm it carries the override
+	// (this is the live reader at RequestBody line 84 that the fix must not break).
+	gcpTr := translator.(*anthropicToGCPAnthropicTranslator)
+	assert.Equal(t, override, gcpTr.requestModel)
+
+	// Non-streaming response omits `model`; the fallback must return the override value.
+	respBody := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
+	_, _, _, responseModel, err := translator.ResponseBody(nil, strings.NewReader(respBody), false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, override, responseModel)
+}
