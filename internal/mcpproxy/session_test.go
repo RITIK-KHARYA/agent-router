@@ -979,6 +979,148 @@ func TestStreamNotifications_AllBackends405(t *testing.T) {
 	require.Greater(t, heartbeatCount, 1, "expected heartbeats while waiting; got output: %s", out)
 }
 
+// TestStreamNotifications_TrailingHeartbeatDoesNotClobberLastEventID verifies
+// the end-to-end fix for the SSE resume-clobber bug. A backend sends a real
+// event (id: real-event) followed by a spec-defined comment-only heartbeat
+// (":\n\n") as the LAST event before the connection closes — the canonical SSE
+// reconnection scenario (a long-lived stream goes idle, the backend sends a
+// keep-alive heartbeat, then the connection drops). The gateway must:
+//   - not flush a bare "id: <composite>\n\n" (no event:/data:) for the heartbeat,
+//   - keep the stored per-backend lastEventID as "real-event" so that, on the
+//     client's reconnect, the gateway forwards Last-Event-Id upstream for that
+//     backend and resumption is not silently dropped.
+func TestStreamNotifications_TrailingHeartbeatDoesNotClobberLastEventID(t *testing.T) {
+	originalHeartbeatInterval := heartbeatInterval
+	heartbeatInterval = 50 * time.Millisecond
+	t.Cleanup(func() { heartbeatInterval = originalHeartbeatInterval })
+
+	// Real backend event (with an id) followed by a comment-only heartbeat.
+	idReal, _ := jsonrpc.MakeID("real-1")
+	realMsg, _ := jsonrpc.EncodeMessage(&jsonrpc.Request{Method: "ping", ID: idReal})
+	body := "event: message\nid: real-event\ndata: " + string(realMsg) + "\n\n" +
+		":\n\n" // trailing comment-only heartbeat — last event before disconnect
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Write the body in small chunks to exercise the incremental parser,
+		// then end the stream (simulating a connection drop after the heartbeat).
+		for i := 0; i < len(body); i += 7 {
+			end := i + 7
+			if end > len(body) {
+				end = len(body)
+			}
+			_, _ = w.Write([]byte(body[i:end]))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = srv.URL
+
+	s := &session{
+		reqCtx: proxy,
+		perBackendSessions: map[filterapi.MCPBackendName]*compositeSessionEntry{
+			"backend1": {backendName: "backend1", sessionID: "s1"},
+		},
+		route: "test-route",
+	}
+
+	rr := httptest.NewRecorder()
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	out := rr.Body.String()
+
+	// The real event must be delivered to the client with its data payload.
+	require.Contains(t, out, "event: message\n")
+	require.Contains(t, out, string(realMsg))
+
+	// Every "id: " line in the output must be part of a complete event block
+	// (i.e. preceded by an "event: " line for the same event). The spurious
+	// heartbeat would emit a bare "id: <composite>\n\n" with no event: or data:.
+	// Count id:/event: lines: there must be exactly one id: line, and it must
+	// come from the real backend event (the gateway's own heartbeats carry no
+	// id).
+	idLines := strings.Count(out, "id: ")
+	require.Equal(t, 1, idLines,
+		"exactly one id: line expected (the real backend event); a spurious bare id: would add another: %s", out)
+
+	// The per-backend stored lastEventID must remain the real event's id — not
+	// "" — so the gateway forwards Last-Event-Id upstream on the client's
+	// reconnect (session.go:384-384 only sets the header when lastEventID != "").
+	cse := s.perBackendSessions["backend1"]
+	require.NotNil(t, cse)
+	require.Equal(t, "real-event", cse.lastEventID,
+		"trailing comment-only heartbeat must not clobber the stored per-backend last event ID")
+}
+
+// TestStreamNotifications_TrailingNewlineDoesNotClobberLastEventID verifies the
+// second trigger of the bug: a stray trailing newline after the final event
+// separator is parsed via the EOF-leftover path and used to clobber the last
+// event ID. The parser fix makes it return nil instead.
+func TestStreamNotifications_TrailingNewlineDoesNotClobberLastEventID(t *testing.T) {
+	originalHeartbeatInterval := heartbeatInterval
+	heartbeatInterval = 50 * time.Millisecond
+	t.Cleanup(func() { heartbeatInterval = originalHeartbeatInterval })
+
+	idReal, _ := jsonrpc.MakeID("real-2")
+	realMsg, _ := jsonrpc.EncodeMessage(&jsonrpc.Request{Method: "ping", ID: idReal})
+	// Real event with its separator, then a stray trailing newline.
+	body := "event: message\nid: real-event-2\ndata: " + string(realMsg) + "\n\n" +
+		"\n" // stray trailing newline
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(body))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = srv.URL
+
+	s := &session{
+		reqCtx: proxy,
+		perBackendSessions: map[filterapi.MCPBackendName]*compositeSessionEntry{
+			"backend1": {backendName: "backend1", sessionID: "s1"},
+		},
+		route: "test-route",
+	}
+
+	rr := httptest.NewRecorder()
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	out := rr.Body.String()
+	require.Contains(t, out, string(realMsg))
+	require.Equal(t, 1, strings.Count(out, "id: "),
+		"exactly one id: line expected; got output: %s", out)
+
+	cse := s.perBackendSessions["backend1"]
+	require.NotNil(t, cse)
+	require.Equal(t, "real-event-2", cse.lastEventID,
+		"trailing stray newline must not clobber the stored per-backend last event ID")
+}
+
 func TestSendRequestPerBackend_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
