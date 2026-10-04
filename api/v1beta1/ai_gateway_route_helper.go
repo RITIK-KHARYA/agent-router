@@ -71,32 +71,6 @@ func (ref *AIGatewayRouteRuleBackendRef) IsAIServiceBackend() bool {
 	return !ref.IsInferencePool()
 }
 
-// HasInferencePoolBackends returns true if the rule contains any InferencePool backend references.
-func (r *AIGatewayRouteRule) HasInferencePoolBackends() bool {
-	if r == nil {
-		return false
-	}
-	for _, ref := range r.BackendRefs {
-		if ref.IsInferencePool() {
-			return true
-		}
-	}
-	return false
-}
-
-// HasAIServiceBackends returns true if the rule contains any AIServiceBackend references.
-func (r *AIGatewayRouteRule) HasAIServiceBackends() bool {
-	if r == nil {
-		return false
-	}
-	for _, ref := range r.BackendRefs {
-		if ref.IsAIServiceBackend() {
-			return true
-		}
-	}
-	return false
-}
-
 // GetNamespace returns the namespace for the backend reference.
 // If the namespace is not specified, it returns the provided defaultNamespace.
 func (ref *AIGatewayRouteRuleBackendRef) GetNamespace(defaultNamespace string) string {
