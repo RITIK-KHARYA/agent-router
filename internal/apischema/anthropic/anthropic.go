@@ -47,14 +47,6 @@ type MessagesRequest struct {
 	// https://docs.claude.com/en/api/messages#body-mcp-servers
 	MCPServers []MCPServer `json:"mcp_servers,omitempty"`
 
-	// Metadata is the metadata for the request.
-	// https://docs.claude.com/en/api/messages#body-metadata
-	Metadata *MessagesMetadata `json:"metadata,omitempty"`
-
-	// ServiceTier indicates the service tier for the request.
-	// https://docs.claude.com/en/api/messages#body-service-tier
-	ServiceTier *MessageServiceTier `json:"service_tier,omitempty"`
-
 	// StopSequences is the list of stop sequences.
 	// https://docs.claude.com/en/api/messages#body-stop-sequences
 	StopSequences []string `json:"stop_sequences,omitempty"`
@@ -996,23 +988,6 @@ func (w WebSearchToolResultContent) MarshalJSON() ([]byte, error) {
 	return nil, fmt.Errorf("web search tool result content must have either results or an error")
 }
 
-// MessagesMetadata represents the metadata for the Anthropic Messages API request.
-// https://docs.claude.com/en/api/messages#body-metadata
-type MessagesMetadata struct {
-	// UserID is an optional user identifier for tracking purposes.
-	UserID *string `json:"user_id,omitempty"`
-}
-
-// MessageServiceTier represents the service tier for the Anthropic Messages API request.
-//
-// https://docs.claude.com/en/api/messages#body-service-tier
-type MessageServiceTier string
-
-const (
-	MessageServiceTierAuto         MessageServiceTier = "auto"
-	MessageServiceTierStandardOnly MessageServiceTier = "standard_only"
-)
-
 // Container represents a container identifier for reuse across requests.
 // This became a beta status so it is not implemented for now.
 // https://platform.claude.com/docs/en/api/beta/messages/create
@@ -1584,13 +1559,12 @@ func (m *MessagesContentBlock) MarshalJSON() ([]byte, error) {
 type StopReason string
 
 const (
-	StopReasonEndTurn                    StopReason = "end_turn"
-	StopReasonMaxTokens                  StopReason = "max_tokens"
-	StopReasonStopSequence               StopReason = "stop_sequence"
-	StopReasonToolUse                    StopReason = "tool_use"
-	StopReasonPauseTurn                  StopReason = "pause_turn"
-	StopReasonRefusal                    StopReason = "refusal"
-	StopReasonModelContextWindowExceeded StopReason = "model_context_window_exceeded"
+	StopReasonEndTurn      StopReason = "end_turn"
+	StopReasonMaxTokens    StopReason = "max_tokens"
+	StopReasonStopSequence StopReason = "stop_sequence"
+	StopReasonToolUse      StopReason = "tool_use"
+	StopReasonPauseTurn    StopReason = "pause_turn"
+	StopReasonRefusal      StopReason = "refusal"
 )
 
 // Usage represents token usage information for the Anthropic Messages API response.
