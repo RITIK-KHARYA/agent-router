@@ -246,28 +246,6 @@ func TestMergeRequestHeaderAttributeMappings(t *testing.T) {
 	}
 }
 
-func TestFormatRequestHeaderAttributeMapping(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    map[string]string
-		expected string
-	}{
-		{name: "nil", input: nil, expected: ""},
-		{name: "empty", input: map[string]string{}, expected: ""},
-		{
-			name:     "sorted output",
-			input:    map[string]string{"x-tenant-id": "tenant.id", "agent-session-id": "session.id"},
-			expected: "agent-session-id:session.id,x-tenant-id:tenant.id",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.expected, FormatRequestHeaderAttributeMapping(tt.input))
-		})
-	}
-}
-
 func TestAIServiceBackendName(t *testing.T) {
 	tests := []struct {
 		name     string

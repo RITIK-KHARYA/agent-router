@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
-	"slices"
 	"strings"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -237,29 +236,6 @@ func MergeRequestHeaderAttributeMappings(base, override map[string]string) map[s
 	maps.Copy(merged, base)
 	maps.Copy(merged, override)
 	return merged
-}
-
-// FormatRequestHeaderAttributeMapping formats a header-to-attribute mapping into a stable, comma-separated string.
-// The output is sorted by header name to make it deterministic for tests and configs.
-func FormatRequestHeaderAttributeMapping(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	var b strings.Builder
-	for i, k := range keys {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		_, _ = b.WriteString(k)
-		b.WriteByte(':')
-		_, _ = b.WriteString(m[k])
-	}
-	return b.String()
 }
 
 // EndpointPrefixes represents well-known endpoint prefixes that AI Gateway supports.
