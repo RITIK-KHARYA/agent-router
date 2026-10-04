@@ -66,7 +66,10 @@ func runStdio2HTTPProxy(ctx context.Context, logger *slog.Logger, name, command 
 		proxyResources(ctx, cs, mcpServer),
 		proxyPrompts(ctx, cs, mcpServer),
 	); err != nil {
-		return "", fmt.Errorf("proxying features: %w", err)
+		// Tear down the stdio session we opened; otherwise the spawned command
+		// would outlive this failed startup.
+		_ = cs.Close()
+		return "", fmt.Errorf("proxying features for the %s stdio2http proxy: %w", name, err)
 	}
 
 	// Find a free port to listen on.
@@ -118,13 +121,16 @@ func proxyTools(ctx context.Context, cs *mcp.ClientSession, server *mcp.Server) 
 		if err != nil {
 			return err
 		}
-		server.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		handler := func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return cs.CallTool(ctx, &mcp.CallToolParams{
 				Meta:      req.Params.Meta,
 				Name:      req.Params.Name,
 				Arguments: req.Params.Arguments,
 			})
-		})
+		}
+		if err := safeAddTool(server, tool, handler); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -139,23 +145,29 @@ func proxyResources(ctx context.Context, cs *mcp.ClientSession, server *mcp.Serv
 		if err != nil {
 			return err
 		}
-		server.AddResource(resource, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		handler := func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 			return cs.ReadResource(ctx, &mcp.ReadResourceParams{
 				Meta: req.Params.Meta,
 				URI:  req.Params.URI,
 			})
-		})
+		}
+		if err := safeAddResource(server, resource, handler); err != nil {
+			return err
+		}
 	}
 	for template, err := range cs.ResourceTemplates(ctx, nil) {
 		if err != nil {
 			return err
 		}
-		server.AddResourceTemplate(template, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		handler := func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 			return cs.ReadResource(ctx, &mcp.ReadResourceParams{
 				Meta: req.Params.Meta,
 				URI:  req.Params.URI,
 			})
-		})
+		}
+		if err := safeAddResourceTemplate(server, template, handler); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -179,4 +191,56 @@ func proxyPrompts(ctx context.Context, cs *mcp.ClientSession, server *mcp.Server
 		})
 	}
 	return nil
+}
+
+// safeAddTool wraps (*mcp.Server).AddTool, which panics by design when tool
+// invariants are violated (for example a missing or non-object inputSchema).
+// The panic is recovered and returned as an error so that a spec-violating
+// upstream stdio MCP server fails startup through the project's normal
+// error-return path instead of crashing the aigw process with an unrecovered
+// panic.
+func safeAddTool(server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("adding tool %q: %w", tool.Name, recoveredError(r))
+		}
+	}()
+	server.AddTool(tool, handler)
+	return nil
+}
+
+// safeAddResource wraps (*mcp.Server).AddResource, which panics by design when
+// the resource URI is malformed. The panic is recovered and returned as an
+// error; see [safeAddTool] for the rationale.
+func safeAddResource(server *mcp.Server, resource *mcp.Resource, handler mcp.ResourceHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("adding resource %q: %w", resource.URI, recoveredError(r))
+		}
+	}()
+	server.AddResource(resource, handler)
+	return nil
+}
+
+// safeAddResourceTemplate wraps (*mcp.Server).AddResourceTemplate, which panics
+// by design when the URI template is malformed. The panic is recovered and
+// returned as an error; see [safeAddTool] for the rationale.
+func safeAddResourceTemplate(server *mcp.Server, template *mcp.ResourceTemplate, handler mcp.ResourceHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("adding resource template %q: %w", template.URITemplate, recoveredError(r))
+		}
+	}()
+	server.AddResourceTemplate(template, handler)
+	return nil
+}
+
+// recoveredError converts a recover()'d panic value into an error, preserving
+// the original error type when the panic value implements error so that
+// errors.Is/errors.As still work across the recovered boundary.
+func recoveredError(r any) error {
+	if e, ok := r.(error); ok {
+		return e
+	}
+	return fmt.Errorf("%v", r)
 }
