@@ -501,10 +501,17 @@ func getGenerationConfigThinkingConfig(tu *openai.ThinkingUnion) *genai.Thinking
 
 		result.IncludeThoughts = tu.OfEnabled.IncludeThoughts
 
-		// Convert int64 to int32,
-		//nolint:gosec // G115: BudgetTokens is known to be within int32 range.
-		budget := int32(tu.OfEnabled.BudgetTokens)
-		result.ThinkingBudget = &budget
+		// Only set ThinkingBudget when a non-zero budget was specified. BudgetTokens
+		// is a plain int64, so an omitted budget decodes to 0; a non-nil pointer to
+		// 0 serializes as "thinkingBudget":0, which disables thinking on Gemini
+		// Flash/Flash-Lite and is rejected by Pro (min 128). Leaving it nil lets
+		// omitempty omit the field so Gemini applies its model-default budget.
+		if tu.OfEnabled.BudgetTokens > 0 {
+			// Convert int64 to int32,
+			//nolint:gosec // G115: BudgetTokens is known to be within int32 range.
+			budget := int32(tu.OfEnabled.BudgetTokens)
+			result.ThinkingBudget = &budget
+		}
 	} else if tu.OfDisabled != nil {
 		// If thinking is disabled, the target config should have default values.
 		// The `omitempty` tags will ensure they aren't marshaled.

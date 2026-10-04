@@ -2742,3 +2742,103 @@ func TestGCPVertexAIRedactBody(t *testing.T) {
 		require.NotContains(t, *resp.Choices[0].Message.Content, "[REDACTED")
 	})
 }
+
+func TestGetGenerationConfigThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name              string
+		input             *openai.ThinkingUnion
+		wantNil           bool
+		wantThinkingNil   bool
+		wantBudget        *int32
+		wantInclude       bool
+		wantExcludeBudget bool   // expect "thinkingBudget" to be absent from JSON
+		wantJSONIs        string // if non-empty, assert marshaled JSON equals this exactly
+	}{
+		{
+			name:    "nil input returns nil",
+			input:   nil,
+			wantNil: true,
+		},
+		{
+			// The bug: enabled without budget_tokens must NOT send thinkingBudget:0,
+			// which disables thinking on Flash/Flash-Lite and errors on Pro (min 128).
+			// ThinkingBudget must be nil so omitempty omits it and Gemini applies its
+			// model-default budget.
+			name:              "enabled without budget omits thinkingBudget",
+			input:             &openai.ThinkingUnion{OfEnabled: &openai.ThinkingEnabled{Type: "enabled"}},
+			wantThinkingNil:   true,
+			wantInclude:       false,
+			wantExcludeBudget: true,
+			wantJSONIs:        `{}`,
+		},
+		{
+			// enabled with IncludeThoughts true and no budget: includeThoughts preserved,
+			// thinkingBudget still omitted.
+			name:              "enabled include_thoughts no budget omits thinkingBudget",
+			input:             &openai.ThinkingUnion{OfEnabled: &openai.ThinkingEnabled{Type: "enabled", IncludeThoughts: true}},
+			wantThinkingNil:   true,
+			wantInclude:       true,
+			wantExcludeBudget: true,
+			wantJSONIs:        `{"includeThoughts":true}`,
+		},
+		{
+			// A client that explicitly sends budget_tokens: 0 is indistinguishable from
+			// "omitted" because BudgetTokens is a plain int64. type:"enabled" with a 0
+			// budget is contradictory (0 disables thinking on Gemini), so we treat it as
+			// "no budget specified" and omit the field. See the bug report's "Note on
+			// parser ambiguity".
+			name:              "enabled with explicit budget zero omits thinkingBudget",
+			input:             &openai.ThinkingUnion{OfEnabled: &openai.ThinkingEnabled{Type: "enabled", BudgetTokens: 0}},
+			wantThinkingNil:   true,
+			wantExcludeBudget: true,
+			wantJSONIs:        `{}`,
+		},
+		{
+			// enabled with explicit non-zero budget: ThinkingBudget set and serialized.
+			name:            "enabled with budget 1000 sets thinkingBudget",
+			input:           &openai.ThinkingUnion{OfEnabled: &openai.ThinkingEnabled{Type: "enabled", BudgetTokens: 1000}},
+			wantThinkingNil: false,
+			wantBudget:      ptr.To(int32(1000)),
+			wantInclude:     false,
+			wantJSONIs:      `{"thinkingBudget":1000}`,
+		},
+		{
+			// disabled: ThinkingBudget nil, IncludeThoughts false, everything omitted.
+			name:              "disabled omits thinkingBudget and includeThoughts",
+			input:             &openai.ThinkingUnion{OfDisabled: &openai.ThinkingDisabled{Type: "disabled"}},
+			wantThinkingNil:   true,
+			wantInclude:       false,
+			wantExcludeBudget: true,
+			wantJSONIs:        `{}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getGenerationConfigThinkingConfig(tc.input)
+			if tc.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+
+			if tc.wantThinkingNil {
+				require.Nil(t, got.ThinkingBudget, "ThinkingBudget must be nil so omitempty omits it")
+			} else {
+				require.NotNil(t, got.ThinkingBudget, "ThinkingBudget must be set")
+				require.Equal(t, *tc.wantBudget, *got.ThinkingBudget)
+			}
+			require.Equal(t, tc.wantInclude, got.IncludeThoughts)
+
+			out, err := json.Marshal(got)
+			require.NoError(t, err)
+			if tc.wantJSONIs != "" {
+				require.JSONEq(t, tc.wantJSONIs, string(out))
+			}
+			if tc.wantExcludeBudget {
+				require.NotContains(t, string(out), "thinkingBudget",
+					"thinkingBudget must be omitted on the wire; got %s", string(out))
+			}
+		})
+	}
+}
