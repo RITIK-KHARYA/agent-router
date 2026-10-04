@@ -865,7 +865,7 @@ func TestSession_StreamNotifications(t *testing.T) {
 			rr := httptest.NewRecorder()
 			ctx, cancel := context.WithTimeout(t.Context(), tc.deadline)
 			defer cancel()
-			err2 := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+			err2 := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler, proxy.promptChangeSignaler)
 			require.ErrorIs(t, err2, context.DeadlineExceeded)
 			out := rr.Body.String()
 			require.Contains(t, out, "event: a1")
@@ -886,8 +886,9 @@ func TestNotifyToolsChanged(t *testing.T) {
 		reloadConfig atomic.Bool
 		proxy        = newTestMCPProxy()
 		cfg          = ProxyConfig{
-			toolChangeSignaler: proxy.toolChangeSignaler,
-			mcpProxyConfig:     proxy.mcpProxyConfig,
+			toolChangeSignaler:   proxy.toolChangeSignaler,
+			promptChangeSignaler: proxy.promptChangeSignaler,
+			mcpProxyConfig:       proxy.mcpProxyConfig,
 		}
 		s = &session{
 			reqCtx: proxy,
@@ -917,7 +918,7 @@ func TestNotifyToolsChanged(t *testing.T) {
 		rr := httptest.NewRecorder()
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		t.Cleanup(cancel)
-		err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+		err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler, proxy.promptChangeSignaler)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		out := rr.Body.String()
 		require.NotContains(t, out, `"id":"`+envoyAIGatewayServerToClientToolsChangedRequestIDPrefix)
@@ -929,12 +930,104 @@ func TestNotifyToolsChanged(t *testing.T) {
 		rr := httptest.NewRecorder()
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		t.Cleanup(cancel)
-		err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+		err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler, proxy.promptChangeSignaler)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		out := rr.Body.String()
 		require.Contains(t, out, `"id":"`+envoyAIGatewayServerToClientToolsChangedRequestIDPrefix)
 		require.Contains(t, out, `"method":"notifications/tools/list_changed"`)
 	})
+}
+
+// TestStreamNotifications_PromptOnlyChangeEmitsPromptListChangedNotToolListChanged is the
+// end-to-end characterization of the bug fix. It drives the live streamNotifications SSE
+// path against a stub backend, triggers a prompt-only LoadConfig reload (adding a
+// PromptSelector.Exclude to one Always-mode backend), and asserts:
+//
+//   - the SSE stream contains notifications/prompts/list_changed (the type the gateway
+//     advertises via Prompts.ListChanged and must author on a config-driven prompt change),
+//   - the SSE stream does NOT contain notifications/tools/list_changed (the wrong type —
+//     no tool-affecting field changed, so mergeToolsList output is byte-for-byte identical).
+//
+// Before the fix, sameTools conflated promptSelectors/neverModePromptIndex into the tool
+// signaler, so a prompt-only reload emitted notifications/tools/list_changed and never
+// emitted notifications/prompts/list_changed. This test pins the corrected behavior.
+func TestStreamNotifications_PromptOnlyChangeEmitsPromptListChangedNotToolListChanged(t *testing.T) {
+	var (
+		reloadConfig atomic.Bool
+		proxy        = newTestMCPProxy()
+		cfg          = ProxyConfig{
+			toolChangeSignaler:   proxy.toolChangeSignaler,
+			promptChangeSignaler: proxy.promptChangeSignaler,
+			mcpProxyConfig:       proxy.mcpProxyConfig,
+		}
+		s = &session{
+			reqCtx: proxy,
+			route:  "test-route",
+			perBackendSessions: map[filterapi.MCPBackendName]*compositeSessionEntry{
+				"backend1": {sessionID: "s1"},
+			},
+		}
+	)
+
+	// Stub backend: keep the SSE stream open so streamNotifications stays alive for the
+	// duration of the test context. The config reload is triggered from inside the handler
+	// once the stream is open, mirroring an active streaming session.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if reloadConfig.Load() {
+			time.Sleep(50 * time.Millisecond)
+			// Prompt-only change: add a PromptSelector.Exclude to backend1. No ToolSelector,
+			// PrefixMode, backend-set, or authorization field changes.
+			require.NoError(t, cfg.LoadConfig(t.Context(), &filterapi.Config{
+				MCPConfig: &filterapi.MCPConfig{
+					BackendListenerAddr: "http://localhost:8080",
+					Routes: []filterapi.MCPRoute{
+						{
+							Name: "test-route",
+							Backends: []filterapi.MCPBackend{
+								{
+									Name:           "backend1",
+									PromptSelector: &filterapi.MCPPromptSelector{Exclude: []string{"internal"}},
+								},
+								{Name: "backend2"},
+							},
+						},
+					},
+				},
+			}))
+		}
+	}))
+	defer srv.Close()
+	proxy.backendListenerAddr = srv.URL
+
+	// First, seed the proxy with a config matching the newTestMCPProxy default (two backends,
+	// no PromptSelector) so the reload below is genuinely prompt-only.
+	require.NoError(t, cfg.LoadConfig(t.Context(), &filterapi.Config{
+		MCPConfig: &filterapi.MCPConfig{
+			BackendListenerAddr: "http://localhost:8080",
+			Routes: []filterapi.MCPRoute{
+				{
+					Name: "test-route",
+					Backends: []filterapi.MCPBackend{
+						{Name: "backend1"},
+						{Name: "backend2"},
+					},
+				},
+			},
+		},
+	}))
+
+	reloadConfig.Store(true)
+	rr := httptest.NewRecorder()
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	t.Cleanup(cancel)
+	err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler, proxy.promptChangeSignaler)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	out := rr.Body.String()
+	require.Contains(t, out, `"id":"`+envoyAIGatewayServerToClientPromptsChangedRequestIDPrefix)
+	require.Contains(t, out, `"method":"notifications/prompts/list_changed"`)
+	require.NotContains(t, out, `"id":"`+envoyAIGatewayServerToClientToolsChangedRequestIDPrefix)
+	require.NotContains(t, out, `"method":"notifications/tools/list_changed"`)
 }
 
 func TestStreamNotifications_AllBackends405(t *testing.T) {
@@ -970,7 +1063,7 @@ func TestStreamNotifications_AllBackends405(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 
-	err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+	err := s.streamNotifications(ctx, rr, proxy.toolChangeSignaler, proxy.promptChangeSignaler)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	out := rr.Body.String()

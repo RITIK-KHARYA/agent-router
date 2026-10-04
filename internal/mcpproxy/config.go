@@ -26,6 +26,7 @@ type (
 	ProxyConfig struct {
 		*mcpProxyConfig
 		toolChangeSignaler         changeSignaler // signals tool changes to active sessions.
+		promptChangeSignaler       changeSignaler // signals prompt changes to active sessions.
 		l                          *slog.Logger
 		sessionCrypto              SessionCrypto
 		tracer                     tracingapi.MCPTracer
@@ -104,6 +105,20 @@ func (m *mcpProxyConfig) sameTools(other *mcpProxyConfig) bool {
 	})
 }
 
+// samePrompts reports whether the prompt-affecting route state is unchanged.
+// It is the prompt counterpart of [mcpProxyConfig.sameTools]: it compares only the
+// fields that mergePromptsList reads (promptSelectors, neverModePromptIndex, plus
+// the backend set), so that a prompt-only config reload is detected as a prompt
+// change rather than being conflated with a tool change.
+func (m *mcpProxyConfig) samePrompts(other *mcpProxyConfig) bool {
+	if m == nil || other == nil {
+		return m == other
+	}
+	return maps.EqualFunc(m.routes, other.routes, func(a, b *mcpProxyConfigRoute) bool {
+		return a.samePrompts(b)
+	})
+}
+
 // effectivePrefixMode returns the effective PrefixMode for the given backend.
 // Per-backend PrefixMode takes precedence; falls back to route-level PrefixMode.
 // An empty string (zero value) for either field is treated as Always (the default).
@@ -114,6 +129,10 @@ func (m *mcpProxyConfigRoute) effectivePrefixMode(backendName filterapi.MCPBacke
 	return m.routePrefixMode
 }
 
+// sameTools reports whether the tool-affecting route state is unchanged. Only fields
+// consulted by mergeToolsList are compared (toolSelectors, neverModeToolIndex, the
+// backend set, and authorization which gates tool calls), so a prompt-only config
+// reload is NOT detected as a tool change.
 func (m *mcpProxyConfigRoute) sameTools(other *mcpProxyConfigRoute) bool {
 	if m == nil || other == nil {
 		return m == other
@@ -124,21 +143,37 @@ func (m *mcpProxyConfigRoute) sameTools(other *mcpProxyConfigRoute) bool {
 	if !m.authorization.same(other.authorization) {
 		return false
 	}
-	// neverModeToolIndex/neverModePromptIndex catch PrefixMode and include-list changes that
-	// don't touch toolSelectors/promptSelectors directly, so reload correctly signals
-	// notifications/tools(prompts)/list_changed for those too.
+	// neverModeToolIndex catches PrefixMode and include-list changes that don't touch
+	// toolSelectors directly, so reload correctly signals
+	// notifications/tools/list_changed for those too.
 	if !maps.Equal(m.neverModeToolIndex, other.neverModeToolIndex) {
 		return false
 	}
+	return maps.EqualFunc(m.toolSelectors, other.toolSelectors, func(a, b *toolSelector) bool {
+		return a.sameTools(b)
+	})
+}
+
+// samePrompts reports whether the prompt-affecting route state is unchanged. Only
+// fields consulted by mergePromptsList are compared (promptSelectors,
+// neverModePromptIndex, and the backend set), so a tool-only config reload is NOT
+// detected as a prompt change. This is the prompt counterpart of sameTools and
+// drives the separate promptChangeSignaler so a prompt-only reload emits
+// notifications/prompts/list_changed rather than notifications/tools/list_changed.
+func (m *mcpProxyConfigRoute) samePrompts(other *mcpProxyConfigRoute) bool {
+	if m == nil || other == nil {
+		return m == other
+	}
+	if !equalKeys(m.backends, other.backends) {
+		return false
+	}
+	// neverModePromptIndex catches PrefixMode and include-list changes that don't touch
+	// promptSelectors directly, so reload correctly signals
+	// notifications/prompts/list_changed for those too.
 	if !maps.Equal(m.neverModePromptIndex, other.neverModePromptIndex) {
 		return false
 	}
-	if !maps.EqualFunc(m.promptSelectors, other.promptSelectors, func(a, b *toolSelector) bool {
-		return a.sameTools(b)
-	}) {
-		return false
-	}
-	return maps.EqualFunc(m.toolSelectors, other.toolSelectors, func(a, b *toolSelector) bool {
+	return maps.EqualFunc(m.promptSelectors, other.promptSelectors, func(a, b *toolSelector) bool {
 		return a.sameTools(b)
 	})
 }
@@ -345,10 +380,14 @@ func (p *ProxyConfig) LoadConfig(_ context.Context, config *filterapi.Config) er
 		newConfig.routes[route.Name] = r
 	}
 
-	toolsChanged := !p.sameTools(newConfig)
-	p.mcpProxyConfig = newConfig // This is racy, but we don't care.
+	toolsChanged := !p.sameTools(newConfig)     // This is racy, but we don't care.
+	promptsChanged := !p.samePrompts(newConfig) // This is racy, but we don't care.
+	p.mcpProxyConfig = newConfig                // This is racy, but we don't care.
 	if toolsChanged {
 		p.toolChangeSignaler.Signal()
+	}
+	if promptsChanged {
+		p.promptChangeSignaler.Signal()
 	}
 
 	return nil
