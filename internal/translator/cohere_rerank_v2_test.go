@@ -7,6 +7,7 @@ package translator
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -233,6 +234,39 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseError(t *testing.T) {
 		require.ErrorContains(t, err, "failed to read error body")
 		require.Nil(t, headerMutation)
 		require.Nil(t, bodyMutation)
+	})
+
+	t.Run("missing_content_type_wraps", func(t *testing.T) {
+		// When content-type is absent, the format is unknown and must be treated
+		// as non-JSON (conservative): wrap the body into a Cohere v2 error JSON.
+		respHeaders := map[string]string{statusHeaderName: "503"}
+		errorBody := "Service Unavailable"
+
+		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		require.NoError(t, err)
+		require.NotNil(t, headerMutation)
+		require.NotNil(t, bodyMutation)
+
+		var cohereErr cohereschema.RerankV2Error
+		require.NoError(t, json.Unmarshal(bodyMutation, &cohereErr))
+		require.NotNil(t, cohereErr.Message)
+		require.Equal(t, errorBody, *cohereErr.Message)
+
+		// The wrapper must set content-type and content-length headers so the
+		// client parses the wrapped body as JSON.
+		var hasContentType, hasContentLength bool
+		for _, h := range headerMutation {
+			switch h.Key() {
+			case contentTypeHeaderName:
+				hasContentType = true
+				require.Equal(t, jsonContentType, h.Value()) //nolint:testifylint // comparing header value, not JSON
+			case contentLengthHeaderName:
+				hasContentLength = true
+				require.Equal(t, strconv.Itoa(len(bodyMutation)), h.Value())
+			}
+		}
+		require.True(t, hasContentType, "content-type header must be set on wrapped error")
+		require.True(t, hasContentLength, "content-length header must be set on wrapped error")
 	})
 }
 
