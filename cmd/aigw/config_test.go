@@ -199,56 +199,6 @@ func TestExpandPath(t *testing.T) {
 	})
 }
 
-func TestRecreateDir(t *testing.T) {
-	tests := []struct {
-		name      string
-		setupFunc func(t *testing.T, path string)
-	}{
-		{
-			name: "creates new directory",
-			setupFunc: func(*testing.T, string) {
-			},
-		},
-		{
-			name: "recreates existing directory",
-			setupFunc: func(t *testing.T, path string) {
-				require.NoError(t, os.MkdirAll(path, 0o755))
-				testFile := filepath.Join(path, "test.txt")
-				require.NoError(t, os.WriteFile(testFile, []byte("test"), 0o600))
-			},
-		},
-		{
-			name: "recreates existing directory with subdirs",
-			setupFunc: func(t *testing.T, path string) {
-				subdir := filepath.Join(path, "subdir")
-				require.NoError(t, os.MkdirAll(subdir, 0o755))
-				testFile := filepath.Join(subdir, "test.txt")
-				require.NoError(t, os.WriteFile(testFile, []byte("test"), 0o600))
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-
-			tt.setupFunc(t, tmpDir)
-
-			err := recreateDir(tmpDir)
-			require.NoError(t, err)
-			// Verify directory exists and is empty.
-			info, err := os.Stat(tmpDir)
-			require.NoError(t, err)
-			require.True(t, info.IsDir())
-
-			// Check directory is empty.
-			entries, err := os.ReadDir(tmpDir)
-			require.NoError(t, err)
-			require.Empty(t, entries)
-		})
-	}
-}
-
 func TestMaybeResolveHome(t *testing.T) {
 	homeDir, err := os.UserHomeDir()
 	require.NoError(t, err)

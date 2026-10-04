@@ -262,19 +262,6 @@ func newEnvoyRunMiddleware(dirs *xdg.Directories, runID string, start time.Time,
 	}
 }
 
-// recreateDir removes the directory at the given path and creates a new one.
-func recreateDir(path string) error {
-	err := os.RemoveAll(path)
-	if err != nil {
-		return fmt.Errorf("failed to remove directory %s: %w", path, err)
-	}
-	err = os.MkdirAll(path, 0o755)
-	if err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", path, err)
-	}
-	return nil
-}
-
 // writeEnvoyResourcesAndRunExtProc reads all resources from the given string, writes them to the output file, and runs
 // external processes for EnvoyExtensionPolicy resources.
 func (runCtx *runCmdContext) writeEnvoyResourcesAndRunExtProc(ctx context.Context, original string) (client.Client, <-chan error, int, error) {
