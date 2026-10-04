@@ -943,9 +943,14 @@ func (c *GatewayController) bspToFilterAPIBackendAuth(ctx context.Context, backe
 			// This allows IRSA/Pod Identity to work automatically
 			auth = &filterapi.BackendAuth{AWSAuth: &filterapi.AWSAuth{Region: awsCred.Region}}
 		} else {
-			// Otherwise, fetch credentials from secret
+			// Otherwise, fetch credentials from secret. When both credentialsFile and
+			// oidcExchangeToken are set, oidcExchangeToken wins so the gateway consumes the
+			// same (rotated) secret the BackendSecurityPolicy controller writes — see
+			// rotateCredential which also selects OIDC in that ambiguous case. The CRD's
+			// XValidation rejects this both-set state at admission; this precedence keeps
+			// already-admitted objects consistent.
 			var secretName string
-			if awsCred.CredentialsFile != nil {
+			if awsCred.CredentialsFile != nil && awsCred.OIDCExchangeToken == nil {
 				secretName = string(awsCred.CredentialsFile.SecretRef.Name)
 			} else {
 				secretName = rotators.GetBSPSecretName(backendSecurityPolicy.Name)

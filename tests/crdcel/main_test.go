@@ -230,6 +230,10 @@ func TestBackendSecurityPolicies(t *testing.T) {
 		{name: "azure_valid_credentials.yaml"},
 		{name: "aws_credential_file.yaml"},
 		{name: "aws_oidc.yaml"},
+		{
+			name:   "aws_both_set.yaml",
+			expErr: "At most one of credentialsFile or oidcExchangeToken may be specified",
+		},
 		// AWSCredentials used to be rejected outright by a CEL rule, because SigV4 needs three
 		// inputs and the override plumbing carried one string.
 		{name: "aws_credential_override.yaml"},
