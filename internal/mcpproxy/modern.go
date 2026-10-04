@@ -218,11 +218,11 @@ func (m *mcpRequestContext) resolveModernRouteBackends(w http.ResponseWriter, ro
 // perBackendMetricsRecorded so the generic recording in serveModernPOST is
 // skipped.
 func (m *mcpRequestContext) handleServerDiscover(ctx context.Context, w http.ResponseWriter, req *jsonrpc.Request, route filterapi.MCPRouteName, span tracingapi.MCPSpan) (handlerResult, error) {
-	m.perBackendMetricsRecorded = true
 	_, selectedBackends, err := m.resolveModernRouteBackends(w, route)
 	if err != nil {
 		return handlerResult{}, err
 	}
+	m.perBackendMetricsRecorded = true
 
 	var results []*mcp.DiscoverResult
 	for _, backend := range selectedBackends {
@@ -332,8 +332,6 @@ func mergeDiscoverResults(l *slog.Logger, results []*mcp.DiscoverResult) *mcp.Di
 // Fan-out handler: records per-backend metrics itself and sets
 // perBackendMetricsRecorded.
 func (m *mcpRequestContext) handleModernToolsList(ctx context.Context, w http.ResponseWriter, r *http.Request, req *jsonrpc.Request, route filterapi.MCPRouteName, span tracingapi.MCPSpan) (handlerResult, error) {
-	m.perBackendMetricsRecorded = true
-
 	// mergeToolsList reads per-caller headers from m.requestHeaders for authorization.
 	// In production this is set at construction (== r.Header); ensure it is populated
 	// even when this handler is invoked directly (e.g. in tests) so auth stays enforced.
@@ -343,6 +341,7 @@ func (m *mcpRequestContext) handleModernToolsList(ctx context.Context, w http.Re
 	if err != nil {
 		return handlerResult{}, err
 	}
+	m.perBackendMetricsRecorded = true
 
 	responses, err := sendToAllModernBackendsAndAggregateResponses[mcp.ListToolsResult](ctx, m, req, route, selected, span)
 	if err != nil {
@@ -363,13 +362,13 @@ func (m *mcpRequestContext) handleModernToolsList(ctx context.Context, w http.Re
 // Fan-out handler: records per-backend metrics itself and sets
 // perBackendMetricsRecorded.
 func (m *mcpRequestContext) handleModernResourcesList(ctx context.Context, w http.ResponseWriter, r *http.Request, req *jsonrpc.Request, route filterapi.MCPRouteName, span tracingapi.MCPSpan) (handlerResult, error) {
-	m.perBackendMetricsRecorded = true
 	m.requestHeaders = r.Header
 
 	_, selected, err := m.resolveModernRouteBackends(w, route)
 	if err != nil {
 		return handlerResult{}, err
 	}
+	m.perBackendMetricsRecorded = true
 
 	responses, err := sendToAllModernBackendsAndAggregateResponses[mcp.ListResourcesResult](ctx, m, req, route, selected, span)
 	if err != nil {
@@ -389,13 +388,13 @@ func (m *mcpRequestContext) handleModernResourcesList(ctx context.Context, w htt
 // Fans out to all backends and namespaces each template's uriTemplate with the
 // backend prefix, mirroring resources/list.
 func (m *mcpRequestContext) handleModernResourceTemplatesList(ctx context.Context, w http.ResponseWriter, r *http.Request, req *jsonrpc.Request, route filterapi.MCPRouteName, span tracingapi.MCPSpan) (handlerResult, error) {
-	m.perBackendMetricsRecorded = true
 	m.requestHeaders = r.Header
 
 	_, selected, err := m.resolveModernRouteBackends(w, route)
 	if err != nil {
 		return handlerResult{}, err
 	}
+	m.perBackendMetricsRecorded = true
 	responses, err := sendToAllModernBackendsAndAggregateResponses[mcp.ListResourceTemplatesResult](ctx, m, req, route, selected, span)
 	if err != nil {
 		onErrorResponse(w, http.StatusInternalServerError, "failed to list resource templates for all backends")
@@ -415,13 +414,13 @@ func (m *mcpRequestContext) handleModernResourceTemplatesList(ctx context.Contex
 // Fan-out handler: records per-backend metrics itself and sets
 // perBackendMetricsRecorded.
 func (m *mcpRequestContext) handleModernPromptsList(ctx context.Context, w http.ResponseWriter, r *http.Request, req *jsonrpc.Request, route filterapi.MCPRouteName, span tracingapi.MCPSpan) (handlerResult, error) {
-	m.perBackendMetricsRecorded = true
 	m.requestHeaders = r.Header
 
 	_, selected, err := m.resolveModernRouteBackends(w, route)
 	if err != nil {
 		return handlerResult{}, err
 	}
+	m.perBackendMetricsRecorded = true
 
 	responses, err := sendToAllModernBackendsAndAggregateResponses[mcp.ListPromptsResult](ctx, m, req, route, selected, span)
 	if err != nil {
