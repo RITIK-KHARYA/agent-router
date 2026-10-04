@@ -285,6 +285,8 @@ type AzureOIDCExchangeToken struct {
 // The default credential chain is recommended for Kubernetes deployments as it supports automatic
 // credential rotation without manual configuration. Credentials are refreshed automatically when
 // they approach expiration (typically hourly for IRSA and Pod Identity).
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.credentialsFile) && has(self.oidcExchangeToken))",message="At most one of credentialsFile or oidcExchangeToken may be specified"
 type BackendSecurityPolicyAWSCredentials struct {
 	// Region specifies the AWS region associated with the policy.
 	//

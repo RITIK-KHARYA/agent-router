@@ -2175,6 +2175,10 @@ spec:
                 required:
                 - region
                 type: object
+                x-kubernetes-validations:
+                - message: At most one of credentialsFile or oidcExchangeToken may
+                    be specified
+                  rule: '!(has(self.credentialsFile) && has(self.oidcExchangeToken))'
               azureAPIKey:
                 description: AzureAPIKey is a mechanism to access Azure OpenAI backend(s).
                   The API key will be injected into the api-key header.
@@ -8611,6 +8615,10 @@ spec:
                 required:
                 - region
                 type: object
+                x-kubernetes-validations:
+                - message: At most one of credentialsFile or oidcExchangeToken may
+                    be specified
+                  rule: '!(has(self.credentialsFile) && has(self.oidcExchangeToken))'
               azureAPIKey:
                 description: AzureAPIKey is a mechanism to access Azure OpenAI backend(s).
                   The API key will be injected into the api-key header.

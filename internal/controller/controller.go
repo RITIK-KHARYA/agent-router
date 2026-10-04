@@ -499,7 +499,10 @@ func backendSecurityPolicySecretRef(bsp *aigv1b1.BackendSecurityPolicy) (name, n
 	case aigv1b1.BackendSecurityPolicyTypeAPIKey:
 		secretRef = bsp.Spec.APIKey.SecretRef
 	case aigv1b1.BackendSecurityPolicyTypeAWSCredentials:
-		if bsp.Spec.AWSCredentials.CredentialsFile != nil {
+		// oidcExchangeToken wins over credentialsFile when both are set (the CRD rejects
+		// this both-set state at admission; this keeps already-admitted objects consistent
+		// with rotateCredential and bspToFilterAPIBackendAuth, which also select OIDC).
+		if bsp.Spec.AWSCredentials.CredentialsFile != nil && bsp.Spec.AWSCredentials.OIDCExchangeToken == nil {
 			secretRef = bsp.Spec.AWSCredentials.CredentialsFile.SecretRef
 		}
 	case aigv1b1.BackendSecurityPolicyTypeGCPCredentials:

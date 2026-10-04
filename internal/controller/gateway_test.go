@@ -1170,6 +1170,23 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 			},
 		},
 		{
+			// Both credentialsFile and oidcExchangeToken are set. The CRD rejects this
+			// state at admission, but already-admitted objects must still behave
+			// consistently: oidcExchangeToken wins (matches rotateCredential), so the
+			// gateway reads the rotated secret ai-eg-bsp-aws-both-set rather than the
+			// static credentialsFile secret.
+			ObjectMeta: metav1.ObjectMeta{Name: "aws-both-set", Namespace: namespace},
+			Spec: aigv1b1.BackendSecurityPolicySpec{
+				Type: aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
+				AWSCredentials: &aigv1b1.BackendSecurityPolicyAWSCredentials{
+					CredentialsFile: &aigv1b1.AWSCredentialsFile{
+						SecretRef: &gwapiv1.SecretObjectReference{Name: "aws-both-set-static"},
+					},
+					OIDCExchangeToken: &aigv1b1.AWSOIDCExchangeToken{},
+				},
+			},
+		},
+		{
 			ObjectMeta: metav1.ObjectMeta{Name: "aws-default-chain", Namespace: namespace},
 			Spec: aigv1b1.BackendSecurityPolicySpec{
 				Type: aigv1b1.BackendSecurityPolicyTypeAWSCredentials,
@@ -1240,8 +1257,20 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 			StringData: map[string]string{rotators.AwsCredentialsKey: "thisisawscredentials"},
 		},
 		{
+			// Static credentialsFile secret referenced by the aws-both-set BSP. Distinct
+			// content from the rotated secret so a wrong-precedence selection is caught.
+			ObjectMeta: metav1.ObjectMeta{Name: "aws-both-set-static", Namespace: namespace},
+			StringData: map[string]string{rotators.AwsCredentialsKey: "static-aws-creds"},
+		},
+		{
 			ObjectMeta: metav1.ObjectMeta{Name: rotators.GetBSPSecretName("aws-oidc"), Namespace: namespace},
 			StringData: map[string]string{rotators.AwsCredentialsKey: "thisisawscredentials"},
+		},
+		{
+			// Rotated secret the BSP controller writes for the aws-both-set BSP. Because
+			// oidcExchangeToken wins, the gateway reads THIS secret, not aws-both-set-static.
+			ObjectMeta: metav1.ObjectMeta{Name: rotators.GetBSPSecretName("aws-both-set"), Namespace: namespace},
+			StringData: map[string]string{rotators.AwsCredentialsKey: "oidc-rotated-aws-creds"},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: rotators.GetBSPSecretName("azure-oidc"), Namespace: namespace},
@@ -1280,6 +1309,14 @@ func TestGatewayController_bspToFilterAPIBackendAuth(t *testing.T) {
 			bspName: "aws-oidc",
 			exp: &filterapi.BackendAuth{
 				AWSAuth: &filterapi.AWSAuth{CredentialFileLiteral: "thisisawscredentials"},
+			},
+		},
+		{
+			// Both-set BSP: oidcExchangeToken wins, so the gateway consumes the rotated
+			// secret (ai-eg-bsp-aws-both-set) — NOT the static credentialsFile secret.
+			bspName: "aws-both-set",
+			exp: &filterapi.BackendAuth{
+				AWSAuth: &filterapi.AWSAuth{CredentialFileLiteral: "oidc-rotated-aws-creds"},
 			},
 		},
 		{
