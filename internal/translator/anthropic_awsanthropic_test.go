@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/awsbedrock"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
@@ -588,4 +590,217 @@ event: message_stop
 data: {"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCount":10,"outputTokenCount":15,"invocationLatency":1798,"firstByteLatency":1507}}
 
 `, string(results))
+}
+
+func TestAnthropicToAWSAnthropicTranslator_ResponseError(t *testing.T) {
+	// The AWS Bedrock InvokeModel error contract: status in :status, exception type in
+	// x-amzn-errortype, JSON body {"message":"..."} (awsbedrock.BedrockException). The inherited
+	// anthropicToAnthropicTranslator.ResponseError returns nil,nil for JSON content-types, which
+	// would pass the raw AWS body through to Anthropic clients unconverted — the bug being fixed.
+	tests := []struct {
+		name          string
+		respHeaders   map[string]string
+		body          string
+		expErrType    string
+		expMessage    string
+		expJSONDecode bool // true asserts the body decodes as an anthropicschema.ErrorResponse
+	}{
+		{
+			// Core regression: JSON application/json BedrockException must be converted to the
+			// Anthropic error shape instead of being passed through as {"message":"..."}.
+			name: "json ValidationException 400 converts to anthropic error shape",
+			respHeaders: map[string]string{
+				statusHeaderName:       "400",
+				contentTypeHeaderName:  "application/json",
+				awsErrorTypeHeaderName: "ValidationException",
+			},
+			body:          `{"message":"messages: field is required"}`,
+			expErrType:    "invalid_request_error",
+			expMessage:    "messages: field is required",
+			expJSONDecode: true,
+		},
+		{
+			// content-type with charset must still be recognized as JSON (strings.Contains match).
+			name: "json content-type with charset converts",
+			respHeaders: map[string]string{
+				statusHeaderName:       "500",
+				contentTypeHeaderName:  "application/json; charset=utf-8",
+				awsErrorTypeHeaderName: "InternalServerException",
+			},
+			body:          `{"message":"internal failure"}`,
+			expErrType:    "api_error",
+			expMessage:    "internal failure",
+			expJSONDecode: true,
+		},
+		{
+			// Model-error (424) is also an AWS service exception and must be converted.
+			name: "json ModelErrorException 424 converts",
+			respHeaders: map[string]string{
+				statusHeaderName:       "424",
+				contentTypeHeaderName:  "application/json",
+				awsErrorTypeHeaderName: "ModelErrorException",
+			},
+			body:          `{"message":"model rejected the prompt"}`,
+			expErrType:    "api_error",
+			expMessage:    "model rejected the prompt",
+			expJSONDecode: true,
+		},
+		{
+			// Throttling (429) maps to rate_limit_error.
+			name: "json ThrottlingException 429 converts to rate_limit_error",
+			respHeaders: map[string]string{
+				statusHeaderName:       "429",
+				contentTypeHeaderName:  "application/json",
+				awsErrorTypeHeaderName: "ThrottlingException",
+			},
+			body:          `{"message":"rate limited"}`,
+			expErrType:    "rate_limit_error",
+			expMessage:    "rate limited",
+			expJSONDecode: true,
+		},
+		{
+			// Access denied (403) maps to permission_error.
+			name: "json AccessDeniedException 403 converts to permission_error",
+			respHeaders: map[string]string{
+				statusHeaderName:       "403",
+				contentTypeHeaderName:  "application/json",
+				awsErrorTypeHeaderName: "AccessDeniedException",
+			},
+			body:          `{"message":"denied"}`,
+			expErrType:    "permission_error",
+			expMessage:    "denied",
+			expJSONDecode: true,
+		},
+		{
+			// Not found (404) maps to not_found_error.
+			name: "json ResourceNotFoundException 404 converts to not_found_error",
+			respHeaders: map[string]string{
+				statusHeaderName:       "404",
+				contentTypeHeaderName:  "application/json",
+				awsErrorTypeHeaderName: "ResourceNotFoundException",
+			},
+			body:          `{"message":"model not found"}`,
+			expErrType:    "not_found_error",
+			expMessage:    "model not found",
+			expJSONDecode: true,
+		},
+		{
+			// A non-JSON (e.g. plain text) error must also be wrapped in the Anthropic error
+			// shape, with the raw body text as the message — matching the inherited behavior.
+			name: "non-json 503 plain text converts to anthropic error shape",
+			respHeaders: map[string]string{
+				statusHeaderName:      "503",
+				contentTypeHeaderName: "text/plain; charset=utf-8",
+			},
+			body:          "Service Unavailable",
+			expErrType:    "service_unavailable_error",
+			expMessage:    "Service Unavailable",
+			expJSONDecode: true,
+		},
+		{
+			// Missing content-type is treated as non-JSON: body read as raw text.
+			name: "missing content-type converts body as raw text",
+			respHeaders: map[string]string{
+				statusHeaderName: "413",
+			},
+			body:          "payload too large",
+			expErrType:    "request_too_large",
+			expMessage:    "payload too large",
+			expJSONDecode: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewAnthropicToAWSAnthropicTranslator("bedrock-2023-05-31", "")
+			hdrs, body, err := translator.ResponseError(tt.respHeaders, strings.NewReader(tt.body))
+			require.NoError(t, err)
+
+			// The fix must produce a body mutation (non-nil, non-empty); the bug returned nil,nil.
+			require.NotNil(t, body, "ResponseError must not return a nil body for AWS errors")
+			require.NotEmpty(t, body, "ResponseError must produce a non-empty Anthropic error body")
+			require.Len(t, hdrs, 2, "expected content-type and content-length headers")
+			require.Equal(t, contentTypeHeaderName, hdrs[0].Key())
+			require.Equal(t, jsonContentType, hdrs[0].Value()) //nolint:testifylint // comparing header value, not JSON
+			require.Equal(t, contentLengthHeaderName, hdrs[1].Key())
+			require.Equal(t, strconv.Itoa(len(body)), hdrs[1].Value())
+
+			if tt.expJSONDecode {
+				var resp anthropicschema.ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp), "body must be an Anthropic ErrorResponse: %s", string(body))
+				require.Equal(t, "error", resp.Type, "top-level type must be \"error\": %s", string(body))
+				require.Equal(t, tt.expErrType, resp.Error.Type, "error.type discriminator mismatch")
+				require.Equal(t, tt.expMessage, resp.Error.Message, "error.message mismatch")
+			}
+		})
+	}
+}
+
+func TestAnthropicToAWSAnthropicTranslator_ResponseError_DecodesBedrockException(t *testing.T) {
+	// Verify the JSON branch decodes the awsbedrock.BedrockException struct (not a raw body
+	// passthrough), mirroring the OpenAI sibling openai_awsanthropic_test.go for the same backend.
+	translator := NewAnthropicToAWSAnthropicTranslator("bedrock-2023-05-31", "")
+	bodyBytes, err := json.Marshal(&awsbedrock.BedrockException{Message: "messages: field is required"})
+	require.NoError(t, err)
+
+	hdrs, body, err := translator.ResponseError(map[string]string{
+		statusHeaderName:       "400",
+		contentTypeHeaderName:  "application/json",
+		awsErrorTypeHeaderName: "ValidationException",
+	}, bytes.NewReader(bodyBytes))
+	require.NoError(t, err)
+	require.NotNil(t, body)
+
+	var resp anthropicschema.ErrorResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	require.Equal(t, "error", resp.Type)
+	require.Equal(t, "invalid_request_error", resp.Error.Type)
+	require.Equal(t, "messages: field is required", resp.Error.Message)
+
+	// The x-amzn-errortype header value must NOT leak into the Anthropic error.type: the
+	// Anthropic error.type is derived from the HTTP status code, not the AWS exception type.
+	require.NotEqual(t, "ValidationException", resp.Error.Type)
+
+	require.Len(t, hdrs, 2)
+	require.Equal(t, contentTypeHeaderName, hdrs[0].Key())
+	require.Equal(t, jsonContentType, hdrs[0].Value()) //nolint:testifylint // comparing header value, not JSON
+	require.Equal(t, contentLengthHeaderName, hdrs[1].Key())
+	require.Equal(t, strconv.Itoa(len(body)), hdrs[1].Value())
+}
+
+func TestAnthropicToAWSAnthropicTranslator_ResponseError_InvalidJSONReturnsError(t *testing.T) {
+	// A malformed JSON body on a JSON content-type must surface a decode error rather than
+	// silently passing the raw body through.
+	translator := NewAnthropicToAWSAnthropicTranslator("bedrock-2023-05-31", "")
+	hdrs, body, err := translator.ResponseError(map[string]string{
+		statusHeaderName:      "400",
+		contentTypeHeaderName: "application/json",
+	}, strings.NewReader(`{"message":"unterminated`))
+	require.Error(t, err)
+	require.Nil(t, hdrs)
+	require.Nil(t, body)
+}
+
+func TestHTTPStatusToAnthropicErrorType(t *testing.T) {
+	tests := []struct {
+		statusCode string
+		expType    string
+	}{
+		{"400", "invalid_request_error"},
+		{"401", "authentication_error"},
+		{"403", "permission_error"},
+		{"404", "not_found_error"},
+		{"413", "request_too_large"},
+		{"429", "rate_limit_error"},
+		{"500", "api_error"},
+		{"503", "service_unavailable_error"},
+		{"529", "overloaded_error"},
+		{"418", "api_error"}, // unknown status falls back to api_error
+		{"", "api_error"},    // missing status falls back to api_error
+	}
+	for _, tt := range tests {
+		t.Run("status_"+tt.statusCode, func(t *testing.T) {
+			assert.Equal(t, tt.expType, httpStatusToAnthropicErrorType(tt.statusCode))
+		})
+	}
 }
