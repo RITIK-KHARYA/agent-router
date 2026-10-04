@@ -101,10 +101,14 @@ func (c *InferencePoolController) syncInferencePool(ctx context.Context, inferen
 }
 
 // routeReferencesInferencePool checks if an AIGatewayRoute references the given InferencePool.
-func (c *InferencePoolController) routeReferencesInferencePool(route *aigv1b1.AIGatewayRoute, inferencePoolName string) bool {
+// It honors the BackendRef namespace: when omitted, the reference defaults to the route's
+// namespace (per Gateway API semantics), otherwise the explicitly specified namespace is used.
+func (c *InferencePoolController) routeReferencesInferencePool(route *aigv1b1.AIGatewayRoute, inferencePoolName, inferencePoolNamespace string) bool {
 	for _, rule := range route.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			if backendRef.IsInferencePool() && backendRef.Name == inferencePoolName {
+			if backendRef.IsInferencePool() &&
+				backendRef.Name == inferencePoolName &&
+				backendRef.GetNamespace(route.Namespace) == inferencePoolNamespace {
 				return true
 			}
 		}
@@ -165,11 +169,16 @@ func (c *InferencePoolController) validateExtensionReference(ctx context.Context
 }
 
 // gatewayReferencesInferencePool checks if a Gateway references the given InferencePool through any routes.
+//
+// Referencing routes may live in a different namespace from the InferencePool (a cross-namespace
+// backend reference authorized by a ReferenceGrant), so routes are listed across all namespaces
+// rather than being scoped to the InferencePool's namespace.
 func (c *InferencePoolController) gatewayReferencesInferencePool(ctx context.Context, gateway *gwapiv1.Gateway, inferencePoolName string, inferencePoolNamespace string) bool {
-	// Check AIGatewayRoutes in the same namespace as the InferencePool that reference this Gateway.
+	// Check AIGatewayRoutes across all namespaces, since a cross-namespace backend reference may
+	// have a route living in a different namespace than the InferencePool.
 	var aiGatewayRoutes aigv1b1.AIGatewayRouteList
-	if err := c.client.List(ctx, &aiGatewayRoutes, client.InNamespace(inferencePoolNamespace)); err != nil {
-		c.logger.Error(err, "failed to list AIGatewayRoutes", "gateway", gateway.Name, "namespace", inferencePoolNamespace)
+	if err := c.client.List(ctx, &aiGatewayRoutes); err != nil {
+		c.logger.Error(err, "failed to list AIGatewayRoutes", "gateway", gateway.Name)
 		return false
 	}
 
@@ -178,16 +187,17 @@ func (c *InferencePoolController) gatewayReferencesInferencePool(ctx context.Con
 		// Check if this route references the Gateway.
 		if c.routeReferencesGateway(route.Spec.ParentRefs, gateway.Name, gateway.Namespace, route.Namespace) {
 			// Check if this route references the InferencePool.
-			if c.routeReferencesInferencePool(route, inferencePoolName) {
+			if c.routeReferencesInferencePool(route, inferencePoolName, inferencePoolNamespace) {
 				return true
 			}
 		}
 	}
 
-	// Check HTTPRoutes in the same namespace as the InferencePool that reference this Gateway.
+	// Check HTTPRoutes across all namespaces; the generated HTTPRoute for an AIGatewayRoute lives
+	// in the AIGatewayRoute's namespace, which may differ from the InferencePool's namespace.
 	var httpRoutes gwapiv1.HTTPRouteList
-	if err := c.client.List(ctx, &httpRoutes, client.InNamespace(inferencePoolNamespace)); err != nil {
-		c.logger.Error(err, "failed to list HTTPRoutes", "gateway", gateway.Name, "namespace", inferencePoolNamespace)
+	if err := c.client.List(ctx, &httpRoutes); err != nil {
+		c.logger.Error(err, "failed to list HTTPRoutes", "gateway", gateway.Name)
 		return false
 	}
 
@@ -196,7 +206,7 @@ func (c *InferencePoolController) gatewayReferencesInferencePool(ctx context.Con
 		// Check if this route references the Gateway.
 		if c.routeReferencesGateway(route.Spec.ParentRefs, gateway.Name, gateway.Namespace, route.Namespace) {
 			// Check if this route references the InferencePool.
-			if c.httpRouteReferencesInferencePool(route, inferencePoolName) {
+			if c.httpRouteReferencesInferencePool(route, inferencePoolName, inferencePoolNamespace) {
 				return true
 			}
 		}
@@ -230,17 +240,29 @@ func (c *InferencePoolController) routeReferencesGateway(parentRefs []gwapiv1.Pa
 }
 
 // httpRouteReferencesInferencePool checks if an HTTPRoute references the given InferencePool.
-func (c *InferencePoolController) httpRouteReferencesInferencePool(route *gwapiv1.HTTPRoute, inferencePoolName string) bool {
+// It honors the BackendRef namespace: when omitted, the reference defaults to the route's
+// namespace (per Gateway API semantics), otherwise the explicitly specified namespace is used.
+func (c *InferencePoolController) httpRouteReferencesInferencePool(route *gwapiv1.HTTPRoute, inferencePoolName, inferencePoolNamespace string) bool {
 	for _, rule := range route.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
 			if backendRef.Group != nil && string(*backendRef.Group) == "inference.networking.k8s.io" &&
 				backendRef.Kind != nil && string(*backendRef.Kind) == "InferencePool" &&
-				string(backendRef.Name) == inferencePoolName {
+				string(backendRef.Name) == inferencePoolName &&
+				httpBackendRefNamespace(backendRef.BackendObjectReference, route.Namespace) == inferencePoolNamespace {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// httpBackendRefNamespace returns the namespace for an HTTPRoute BackendObjectReference,
+// defaulting to the route's namespace when not explicitly set (per Gateway API semantics).
+func httpBackendRefNamespace(ref gwapiv1.BackendObjectReference, routeNamespace string) string {
+	if ref.Namespace != nil && *ref.Namespace != "" {
+		return string(*ref.Namespace)
+	}
+	return routeNamespace
 }
 
 // updateInferencePoolStatus updates the status of the InferencePool.
@@ -328,9 +350,11 @@ func (c *InferencePoolController) gatewayEventHandler(ctx context.Context, obj c
 		return nil
 	}
 
-	// Find all InferencePools in the same namespace that might be affected by this Gateway.
+	// Find all InferencePools that might be affected by this Gateway. Pools are listed across all
+	// namespaces because a Gateway may be referenced by a route in another namespace that, in turn,
+	// references an InferencePool in yet another namespace (cross-namespace backend reference).
 	var inferencePools gwaiev1.InferencePoolList
-	if err := c.client.List(ctx, &inferencePools, client.InNamespace(gateway.Namespace)); err != nil {
+	if err := c.client.List(ctx, &inferencePools); err != nil {
 		c.logger.Error(err, "failed to list InferencePools for Gateway event", "gateway", gateway.Name)
 		return nil
 	}
@@ -367,7 +391,7 @@ func (c *InferencePoolController) aiGatewayRouteEventHandler(_ context.Context, 
 				requests = append(requests, reconcile.Request{
 					NamespacedName: client.ObjectKey{
 						Name:      backendRef.Name,
-						Namespace: route.Namespace,
+						Namespace: backendRef.GetNamespace(route.Namespace),
 					},
 				})
 			}
@@ -393,7 +417,7 @@ func (c *InferencePoolController) httpRouteEventHandler(_ context.Context, obj c
 				requests = append(requests, reconcile.Request{
 					NamespacedName: client.ObjectKey{
 						Name:      string(backendRef.Name),
-						Namespace: route.Namespace,
+						Namespace: httpBackendRefNamespace(backendRef.BackendObjectReference, route.Namespace),
 					},
 				})
 			}
