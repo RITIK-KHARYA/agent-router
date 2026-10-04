@@ -727,6 +727,86 @@ func TestOpenAIToAWSBedrockTranslatorV1ChatCompletion_RequestBody(t *testing.T) 
 			},
 		},
 		{
+			name: "test none tool choice for anthropic claude model",
+			input: openai.ChatCompletionRequest{
+				Model: "bedrock.anthropic.claude-3-5-sonnet-20240620-v1:0",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Content: openai.StringOrUserRoleContentUnion{
+								Value: "from-user",
+							},
+							Role: openai.ChatMessageRoleUser,
+						},
+					},
+				},
+				Tools: []openai.Tool{
+					{
+						Type: "function",
+						Function: &openai.FunctionDefinition{
+							Name:        "get_current_weather",
+							Description: "Get the current weather in a given location",
+						},
+					},
+				},
+				ToolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "none"},
+			},
+			output: awsbedrock.ConverseInput{
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role: openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("from-user"),
+							},
+						},
+					},
+				},
+				// ToolConfig is nil: tool_choice "none" suppresses the entire ToolConfiguration
+				// so the model has no tools to call, matching OpenAI "none" semantics.
+			},
+		},
+		{
+			name: "test none tool choice for non-anthropic model",
+			input: openai.ChatCompletionRequest{
+				Model: "amazon.nova-pro-v1:0",
+				Messages: []openai.ChatCompletionMessageParamUnion{
+					{
+						OfUser: &openai.ChatCompletionUserMessageParam{
+							Content: openai.StringOrUserRoleContentUnion{
+								Value: "from-user",
+							},
+							Role: openai.ChatMessageRoleUser,
+						},
+					},
+				},
+				Tools: []openai.Tool{
+					{
+						Type: "function",
+						Function: &openai.FunctionDefinition{
+							Name:        "get_current_weather",
+							Description: "Get the current weather in a given location",
+						},
+					},
+				},
+				ToolChoice: &openai.ChatCompletionToolChoiceUnion{Value: "none"},
+			},
+			output: awsbedrock.ConverseInput{
+				InferenceConfig: &awsbedrock.InferenceConfiguration{},
+				Messages: []*awsbedrock.Message{
+					{
+						Role: openai.ChatMessageRoleUser,
+						Content: []*awsbedrock.ContentBlock{
+							{
+								Text: ptr.To("from-user"),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "test single stop word",
 			input: openai.ChatCompletionRequest{
 				Model: "gpt-4o",

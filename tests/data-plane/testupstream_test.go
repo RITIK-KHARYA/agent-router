@@ -392,6 +392,23 @@ func TestWithTestUpstream(t *testing.T) {
 			expStatus:       http.StatusOK,
 		},
 		{
+			// tool_choice "none" must suppress the entire ToolConfiguration on the wire so
+			// the model has no tools to call (Bedrock has no "none" variant). The translated
+			// Converse request body sent to the upstream must have NO "toolConfig" key even
+			// though the client supplied a non-empty tools array.
+			name:            "aws-bedrock - /v1/chat/completions - tool_choice none suppresses toolConfig",
+			backend:         "aws-bedrock",
+			path:            "/v1/chat/completions",
+			expPath:         "/model/something/converse",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"something","messages":[{"role":"user","content":"What is 2+2?"}],"tools":[{"type":"function","function":{"name":"get_current_weather","description":"Get the current weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],"tool_choice":"none"}`,
+			expRequestBody:  `{"inferenceConfig":{},"messages":[{"content":[{"text":"What is 2+2?"}],"role":"user"}]}`,
+			responseBody:    `{"output":{"message":{"content":[{"text":"4"}],"role":"assistant"}},"stopReason":null,"usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30}}`,
+			responseHeaders: "x-amzn-requestid:2bc5b090-a26c-4007-9467-ce5adc4ffa1d",
+			expResponseBody: `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"4","role":"assistant"}}],"created":123, "id":"2bc5b090-a26c-4007-9467-ce5adc4ffa1d","model":"something","object":"chat.completion","usage":{"completion_tokens":20,"prompt_tokens":10,"total_tokens":30}}`,
+			expStatus:       http.StatusOK,
+		},
+		{
 			name:            "gcp-anthropic - /v1/chat/completions - tool call results",
 			backend:         "gcp-anthropicai",
 			path:            "/v1/chat/completions",

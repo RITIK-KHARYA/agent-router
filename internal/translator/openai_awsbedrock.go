@@ -159,8 +159,10 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) RequestBody(_ []byte, ope
 	if err != nil {
 		return nil, nil, err
 	}
-	// Convert ToolConfiguration.
-	if len(openAIReq.Tools) > 0 {
+	// Convert ToolConfiguration. OpenAI tool_choice "none" means the model must not
+	// call any tool; AWS Bedrock has no "none" variant, so the entire ToolConfiguration
+	// is omitted to ensure the model has no tools to call.
+	if len(openAIReq.Tools) > 0 && !isToolChoiceNone(openAIReq.ToolChoice) {
 		bedrockReq.ToolConfig, err = openAIToolsToBedrockToolConfig(openAIReq.Tools, openAIReq.ToolChoice, openAIReq.Model)
 		if err != nil {
 			return nil, nil, err
