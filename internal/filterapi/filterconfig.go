@@ -13,10 +13,7 @@ package filterapi
 
 import (
 	"log/slog"
-	"os"
 	"time"
-
-	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
@@ -186,9 +183,6 @@ const (
 	// APISchemaTypeSafe represents the native TypeSafe AI System One API schema (Jev).
 	APISchemaTypeSafe APISchemaName = "TypeSafe"
 )
-
-// RouteRuleName is the name of the route rule.
-type RouteRuleName string
 
 // Backend corresponds to AIGatewayRouteRuleBackendRef in api/v1alpha1/api.go
 // besides that this abstracts the concept of a backend at Envoy Gateway level to a simple name.
@@ -394,17 +388,4 @@ type HTTPBodyField struct {
 	// string, number, boolean, object, array, or null.
 	// The value will be parsed as JSON and inserted at the specified field.
 	Value string `json:"value"`
-}
-
-// UnmarshalConfigYaml reads the file at the given path and unmarshals it into a Config struct.
-func UnmarshalConfigYaml(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var cfg Config
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
 }
