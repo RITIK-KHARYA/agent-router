@@ -107,6 +107,41 @@ func wrapAnthropicSSEInEventStream(sseData string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// wrapAnthropicExceptionInEventStream builds an AWS EventStream exception frame matching how
+// Bedrock delivers mid-stream ModeledExceptions (e.g. throttlingException) for
+// InvokeModelWithResponseStream: a :message-type = exception / :exception-type = <exceptionType>
+// message whose payload is the marshaled exception struct ({"message":"..."} under restjson).
+// This mirrors the wire format produced by the AWS Bedrock Runtime SDK's exception MarshalEvent.
+func wrapAnthropicExceptionInEventStream(exceptionType, message string) ([]byte, error) {
+	return wrapAnthropicExceptionInEventStreamWithHeaders(exceptionType, message, true)
+}
+
+// wrapAnthropicExceptionInEventStreamWithHeaders builds an exception frame, optionally omitting
+// the :exception-type header (to exercise the "unknown" fallback path).
+func wrapAnthropicExceptionInEventStreamWithHeaders(exceptionType, message string, includeExceptionType bool) ([]byte, error) {
+	buf := bytes.NewBuffer(nil)
+	encoder := eventstream.NewEncoder()
+	payload, err := json.Marshal(struct {
+		Message string `json:"message"`
+	}{Message: message})
+	if err != nil {
+		return nil, err
+	}
+	headers := eventstream.Headers{
+		{Name: ":message-type", Value: eventstream.StringValue("exception")},
+	}
+	if includeExceptionType {
+		headers = append(headers, eventstream.Header{Name: ":exception-type", Value: eventstream.StringValue(exceptionType)})
+	}
+	if err := encoder.Encode(buf, eventstream.Message{
+		Headers: headers,
+		Payload: payload,
+	}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // TestResponseModel_AWSAnthropic tests that AWS Anthropic (non-streaming) returns the request model
 // AWS Anthropic uses deterministic model mapping without virtualization
 func TestResponseModel_AWSAnthropic(t *testing.T) {
@@ -773,6 +808,95 @@ func TestAWSAnthropicStreamParser_ErrorHandling(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "failed to read from stream body")
 	})
+}
+
+// TestAWSAnthropicStreamParser_MidStreamException verifies that a mid-stream AWS Bedrock
+// ModeledException (delivered as an EventStream :message-type = exception frame) is surfaced
+// to the client as an error rather than being silently discarded and terminated with [DONE].
+func TestAWSAnthropicStreamParser_MidStreamException(t *testing.T) {
+	// A realistic partial stream: message_start, content_block_start, a single content delta,
+	// then a mid-stream throttlingException frame (no message_delta/message_stop, so no
+	// finish_reason is ever produced — exactly the truncation scenario from the bug report).
+	sseStream := `event: message_start
+data: {"type": "message_start", "message": {"id": "msg_exc1", "type": "message", "role": "assistant", "content": [], "model": "claude-opus-4-20250514", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 10, "output_tokens": 1}}}
+
+event: content_block_start
+data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+
+event: content_block_delta
+data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}
+
+`
+
+	eventStreamData, err := wrapAnthropicSSEInEventStream(sseStream)
+	require.NoError(t, err)
+
+	// Append a mid-stream throttlingException frame, exactly as Bedrock delivers it.
+	exceptionFrame, err := wrapAnthropicExceptionInEventStream("throttlingException", "Rate exceeded")
+	require.NoError(t, err)
+	eventStreamData = append(eventStreamData, exceptionFrame...)
+
+	openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
+	_, _, err = translator.RequestBody(nil, openAIReq, false)
+	require.NoError(t, err)
+
+	_, body, _, _, err := translator.ResponseBody(map[string]string{}, bytes.NewReader(eventStreamData), true, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "anthropic stream error")
+	require.Contains(t, err.Error(), "throttlingException")
+	require.Contains(t, err.Error(), "Rate exceeded")
+
+	// Content streamed before the exception must still be delivered to the client.
+	require.NotNil(t, body)
+	bodyStr := string(body)
+	require.Contains(t, bodyStr, `"content":"Hello"`)
+	// The stream must NOT terminate with [DONE] on an error: the error replaces the terminal
+	// signal so naive clients cannot mistake a truncated response for a successful completion.
+	require.NotContains(t, bodyStr, string(sseDoneMessage))
+	// No finish_reason chunk is produced for an exception-truncated stream (no message_stop).
+	require.NotContains(t, bodyStr, "finish_reason")
+}
+
+// TestAWSAnthropicStreamParser_MidStreamException_NoExceptionTypeHeader verifies the fallback
+// "unknown" exception type when Bedrock omits the :exception-type header.
+func TestAWSAnthropicStreamParser_MidStreamException_NoExceptionTypeHeader(t *testing.T) {
+	exceptionFrame, err := wrapAnthropicExceptionInEventStreamWithHeaders("throttlingException", "boom", false)
+	require.NoError(t, err)
+
+	openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
+	_, _, err = translator.RequestBody(nil, openAIReq, false)
+	require.NoError(t, err)
+
+	_, _, _, _, err = translator.ResponseBody(map[string]string{}, bytes.NewReader(exceptionFrame), true, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "anthropic stream error: unknown - boom")
+}
+
+// TestAWSAnthropicStreamParser_MidStreamException_NoMessageField verifies the raw-payload
+// fallback when the exception payload lacks a "message" JSON field.
+func TestAWSAnthropicStreamParser_MidStreamException_NoMessageField(t *testing.T) {
+	buf := bytes.NewBuffer(nil)
+	encoder := eventstream.NewEncoder()
+	require.NoError(t, encoder.Encode(buf, eventstream.Message{
+		Headers: eventstream.Headers{
+			{Name: ":message-type", Value: eventstream.StringValue("exception")},
+			{Name: ":exception-type", Value: eventstream.StringValue("modelTimeoutException")},
+		},
+		// Payload has no "message" key; the fix must fall back to the raw payload string.
+		Payload: []byte(`{"someOther":"detail"}`),
+	}))
+
+	openAIReq := &openai.ChatCompletionRequest{Stream: true, Model: "test-model", MaxTokens: new(int64)}
+	translator := NewChatCompletionOpenAIToAWSAnthropicTranslator("", "").(*openAIToAWSAnthropicTranslatorV1ChatCompletion)
+	_, _, err := translator.RequestBody(nil, openAIReq, false)
+	require.NoError(t, err)
+
+	_, _, _, _, err = translator.ResponseBody(map[string]string{}, bytes.NewReader(buf.Bytes()), true, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "anthropic stream error: modelTimeoutException")
+	require.Contains(t, err.Error(), `{"someOther":"detail"}`)
 }
 
 func TestOpenAIToAWSAnthropicTranslator_ResponseHeaders(t *testing.T) {
