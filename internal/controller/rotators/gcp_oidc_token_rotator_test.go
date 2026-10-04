@@ -32,6 +32,7 @@ import (
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller/tokenprovider"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 const (
@@ -549,6 +550,152 @@ func TestExchangeJWTForSTSToken_WithoutAuthOption(t *testing.T) {
 	expectedExpiryTime := time.Now().Add(time.Hour)
 	timeDiff := tokenExpiry.ExpiresAt.Sub(expectedExpiryTime)
 	require.Less(t, timeDiff.Abs(), time.Second*5, "Expiry time should be close to expected value")
+}
+
+// TestExchangeJWTForSTSToken_Scope asserts that the OAuth scope requested on the
+// STS token-exchange request is conditioned on whether service-account
+// impersonation is configured. When impersonation follows, the STS token is
+// only used to call generateAccessToken, so the minimal IAM scope is correct.
+// When impersonation is omitted the STS token is used directly as the
+// data-plane credential, so it must request the cloud-platform scope.
+func TestExchangeJWTForSTSToken_Scope(t *testing.T) {
+	cases := []struct {
+		name              string
+		impersonationSet  bool
+		expectedScope     string
+		expectedAudience  string
+		expectedGrantType string
+	}{
+		{
+			name:              "with service account impersonation requests iam scope",
+			impersonationSet:  true,
+			expectedScope:     gcpIAMScope,
+			expectedAudience:  "//iam.googleapis.com/projects/test-project/locations/global/workloadIdentityPools/test-pool/providers/test-provider",
+			expectedGrantType: grantTypeTokenExchange,
+		},
+		{
+			name:              "without service account impersonation requests cloud-platform scope",
+			impersonationSet:  false,
+			expectedScope:     stsTokenScope,
+			expectedAudience:  "//iam.googleapis.com/projects/test-project/locations/global/workloadIdentityPools/test-pool/providers/test-provider",
+			expectedGrantType: grantTypeTokenExchange,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				require.Equal(t, "/v1/token", r.URL.Path)
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				capturedBody = body
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"access_token":"test-sts-token","expires_in":3600,"token_type":"Bearer"}`)
+			}))
+			defer server.Close()
+
+			wifConfig := &aigv1b1.GCPWorkloadIdentityFederationConfig{
+				ProjectID:                    "test-project",
+				WorkloadIdentityPoolName:     "test-pool",
+				WorkloadIdentityProviderName: "test-provider",
+			}
+			if tc.impersonationSet {
+				wifConfig.ServiceAccountImpersonation = &aigv1b1.GCPServiceAccountImpersonationConfig{
+					ServiceAccountName: "test-service-account",
+				}
+			}
+
+			tokenExpiry, err := exchangeJWTForSTSToken(context.Background(), "test-jwt-token", wifConfig, option.WithEndpoint(server.URL))
+			require.NoError(t, err)
+			require.NotNil(t, tokenExpiry)
+			require.Equal(t, "test-sts-token", tokenExpiry.Token)
+
+			var parsed struct {
+				Scope              string `json:"scope"`
+				Audience           string `json:"audience"`
+				GrantType          string `json:"grantType"`
+				RequestedTokenType string `json:"requestedTokenType"`
+				SubjectTokenType   string `json:"subjectTokenType"`
+			}
+			require.NoError(t, json.Unmarshal(capturedBody, &parsed))
+			require.Equal(t, tc.expectedScope, parsed.Scope, "STS request scope for %s", tc.name)
+			require.Equal(t, tc.expectedAudience, parsed.Audience)
+			require.Equal(t, tc.expectedGrantType, parsed.GrantType)
+			require.Equal(t, tokenTypeAccessToken, parsed.RequestedTokenType)
+			require.Equal(t, tokenTypeJWT, parsed.SubjectTokenType)
+		})
+	}
+}
+
+// TestGCPOIDCTokenRotator_Rotate_DirectUseScope is an end-to-end test for the
+// no-impersonation (direct-use) WIF path. It wires the rotator to the real
+// exchangeJWTForSTSToken (pointed at an httptest.Server) and verifies that:
+//   - the STS token-exchange request carries the cloud-platform scope (so the
+//     stored token is usable by the data plane against GCP service APIs), and
+//   - the resulting STS token is stored verbatim in the secret.
+//
+// This guards against regressions of the bug where the direct-use path issued
+// an IAM-scoped token that GCP service APIs reject with insufficient-scope.
+func TestGCPOIDCTokenRotator_Rotate_DirectUseScope(t *testing.T) {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypes(corev1.SchemeGroupVersion, &corev1.Secret{})
+
+	stsResponse := `{"access_token":"cloud-platform-scoped-sts-token","expires_in":3600,"token_type":"Bearer"}`
+
+	var capturedScope string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/token", r.URL.Path)
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		var parsed struct {
+			Scope string `json:"scope"`
+		}
+		require.NoError(t, json.Unmarshal(body, &parsed))
+		capturedScope = parsed.Scope
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, stsResponse)
+	}))
+	defer server.Close()
+
+	expiry := time.Now().Add(2 * time.Hour)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	rotator := &gcpOIDCTokenRotator{
+		client: fakeClient,
+		logger: logr.Logger{},
+		gcpCredentials: aigv1b1.BackendSecurityPolicyGCPCredentials{
+			ProjectName: dummyProjectName,
+			Region:      dummyProjectRegion,
+			WorkloadIdentityFederationConfig: &aigv1b1.GCPWorkloadIdentityFederationConfig{
+				ProjectID:                    "test-project-id",
+				WorkloadIdentityPoolName:     "test-pool-name",
+				WorkloadIdentityProviderName: "test-provider",
+			},
+		},
+		backendSecurityPolicyName:      "test-policy",
+		backendSecurityPolicyNamespace: "default",
+		preRotationWindow:              5 * time.Minute,
+		oidcProvider:                   tokenprovider.NewMockTokenProvider(dummyJWTToken, expiry, nil),
+		saTokenFunc:                    impersonateServiceAccount,
+		stsTokenFunc: func(ctx context.Context, jwtToken string, wifConfig *aigv1b1.GCPWorkloadIdentityFederationConfig, opts ...option.ClientOption) (*tokenprovider.TokenExpiry, error) {
+			return exchangeJWTForSTSToken(ctx, jwtToken, wifConfig, append(opts, option.WithEndpoint(server.URL))...)
+		},
+	}
+
+	exportedToken, err := rotator.Rotate(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, stsTokenScope, capturedScope, "direct-use STS exchange must request cloud-platform scope")
+
+	var actualSec corev1.Secret
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKey{
+		Namespace: "default",
+		Name:      GetBSPSecretName("test-policy"),
+	}, &actualSec))
+	require.Equal(t, []byte("cloud-platform-scoped-sts-token"), actualSec.Data[GCPAccessTokenKey], "direct-use path must store the STS token verbatim")
+	require.Equal(t, []byte(dummyProjectName), actualSec.Data[GCPProjectNameKey])
+	require.Equal(t, []byte(dummyProjectRegion), actualSec.Data[GCPRegionKey])
+	require.NotNil(t, exportedToken)
 }
 
 // roundTripperFunc implements http.RoundTripper interface for custom response handling.
