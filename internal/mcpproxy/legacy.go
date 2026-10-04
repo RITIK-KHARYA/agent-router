@@ -482,11 +482,6 @@ func errorType(err error) metrics.MCPErrorType {
 
 // handleInitializeRequest handles the "initialize" JSON-RPC method.
 func (m *mcpRequestContext) handleInitializeRequest(ctx context.Context, w http.ResponseWriter, req *jsonrpc.Request, p *mcp.InitializeParams, route, subject string, span tracingapi.MCPSpan, startAt time.Time) error {
-	// Mark that per-backend metrics will be recorded to avoid duplicate recording in defer.
-	// This must be set early to handle any early returns that might occur.
-	// Note: mcp_request_duration and mcp_method_count are already recorded per-backend in initializeSession().
-	m.perBackendMetricsRecorded = true
-
 	m.metrics.RecordClientCapabilities(ctx, p.Capabilities, p)
 	s, err := m.newSession(ctx, p, route, subject, span, startAt)
 	if err != nil {
@@ -499,6 +494,12 @@ func (m *mcpRequestContext) handleInitializeRequest(ctx context.Context, w http.
 		}
 		return err
 	}
+	// Mark that per-backend metrics will be recorded to avoid duplicate recording in defer.
+	// This is set only after newSession succeeds so resolve failures (403 access denied /
+	// 500 unknown route) flow through recordPOSTCompletion's generic error branch and record
+	// mcp.request.duration / mcp.method.count like the other early-return guards.
+	// Note: mcp_request_duration and mcp_method_count are already recorded per-backend in initializeSession().
+	m.perBackendMetricsRecorded = true
 	// initialize is the one method that creates the client-facing session rather
 	// than being handed one, so it records it here; every other method is covered
 	// by the deferred block in servePOST.
