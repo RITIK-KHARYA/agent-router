@@ -30,14 +30,6 @@ var (
 	errInvalidJSONSchema                   = fmt.Errorf("invalid JSON schema")
 )
 
-// jsonSchemaDeepCopyMapStringAny creates a safe deep copy of a map[string]any.
-func jsonSchemaDeepCopyMapStringAny(original map[string]any) (map[string]any, error) {
-	if original == nil {
-		return nil, nil
-	}
-	return jsonSchemaDeepCopyMapStringAnySafe(original, 0)
-}
-
 // jsonSchemaDeepCopyMapStringAnySafe performs the actual deep copy with recursion depth checks.
 func jsonSchemaDeepCopyMapStringAnySafe(original map[string]any, depth int) (map[string]any, error) {
 	if original == nil {
