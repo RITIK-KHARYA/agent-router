@@ -367,7 +367,6 @@ func jsonSchemaDereference(schemaObj map[string]any) (any, error) {
 		return nil, fmt.Errorf("%w: schema object cannot be nil", errInvalidJSONSchema)
 	}
 
-	// The budget is shared by both passes so the total work is bounded.
 	budget := newJSONSchemaNodeBudget()
 	processedRefs := make(map[string]struct{})
 	skipKeys, err := jsonSchemaSkipKeys(schemaObj, schemaObj, processedRefs, budget, 0)
@@ -375,10 +374,14 @@ func jsonSchemaDereference(schemaObj map[string]any) (any, error) {
 		return nil, fmt.Errorf("failed to determine skip keys: %w", err)
 	}
 
-	// Reset processed refs for the actual dereferencing
+	// The dereference pass gets its own budget. The skip-key traversal walks the entire
+	// schema, including unreferenced $defs that pass 2 will never visit, so charging it
+	// against the dereference budget would reject schemas whose $ref resolution is well
+	// within the jsonSchemaMaxNodes cap (which documents bounding nodes visited while
+	// resolving $refs). Each pass is still individually bounded by jsonSchemaMaxNodes.
 	processedRefs = make(map[string]struct{})
+	budget = newJSONSchemaNodeBudget()
 
-	// Call the recursive helper function to perform the dereferencing
 	return jsonSchemaDereferenceHelper(schemaObj, schemaObj, skipKeys, processedRefs, budget, 0)
 }
 
