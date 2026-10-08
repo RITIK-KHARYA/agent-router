@@ -509,6 +509,88 @@ func TestJsonSchemaDereferenceNodeLimit(t *testing.T) {
 	})
 }
 
+// makeLargeUnreferencedDefsSchema builds a schema whose $defs catalog contains defCount
+// unreferenced definitions plus a single ReferencedDef that the main body references
+// refCount times. Each definition is small, so defCount must be large for the skip-key
+// pre-pass (jsonSchemaSkipKeys) alone to approach the jsonSchemaMaxNodes cap, while the
+// dereference pass (jsonSchemaDereferenceHelper) only expands the refCount referenced
+// definitions. This is the shape that triggers the shared-budget bug: pass 1 visits the
+// entire schema including unreferenced $defs, and pass 2 only the handful of referenced
+// ones.
+func makeLargeUnreferencedDefsSchema(defCount, refCount int) map[string]any {
+	makeDef := func() map[string]any {
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"a": map[string]any{"type": "string"},
+				"b": map[string]any{"type": "string"},
+				"c": map[string]any{"type": "string"},
+			},
+		}
+	}
+	defs := make(map[string]any, defCount+1)
+	for i := 0; i < defCount; i++ {
+		defs[fmt.Sprintf("def%05d", i)] = makeDef()
+	}
+	defs["ReferencedDef"] = makeDef()
+
+	properties := make(map[string]any, refCount)
+	for i := 0; i < refCount; i++ {
+		properties[fmt.Sprintf("p%05d", i)] = map[string]any{"$ref": "#/$defs/ReferencedDef"}
+	}
+	return map[string]any{
+		"type":       "object",
+		"properties": properties,
+		"$defs":      defs,
+	}
+}
+
+func TestJsonSchemaDereferenceLargeUnreferencedDefs(t *testing.T) {
+	// defCount/refCount tuned so the skip-key pre-pass visits ~49400 nodes (under the
+	// 50000 cap) while the dereference pass only expands the 200 referenced definitions.
+	// With the pre-fix shared budget, the pre-pass consumed almost all of the 50000-node
+	// budget, leaving too little for the dereference pass and rejecting the schema with a
+	// spurious "maximum number of schema nodes exceeded" error even though resolving the
+	// referenced $refs needs only ~1200 nodes.
+	schema := makeLargeUnreferencedDefsSchema(9638, 200)
+
+	expectedDef := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"a": map[string]any{"type": "string"},
+			"b": map[string]any{"type": "string"},
+			"c": map[string]any{"type": "string"},
+		},
+	}
+
+	t.Run("dereference succeeds and expands referenced defs", func(t *testing.T) {
+		got, err := jsonSchemaDereference(schema)
+		require.NoError(t, err)
+
+		result, ok := got.(map[string]any)
+		require.True(t, ok, "dereferenced schema should be a map")
+
+		// $defs is in the skip-key set, so it must be copied verbatim, including the
+		// unreferenced definitions that pass 2 never expanded.
+		require.Contains(t, result, "$defs")
+		require.Len(t, result["$defs"], 9638+1)
+
+		// Every referenced property must be fully expanded to ReferencedDef's structure.
+		props, ok := result["properties"].(map[string]any)
+		require.True(t, ok)
+		require.Len(t, props, 200)
+		require.Equal(t, expectedDef, props[fmt.Sprintf("p%05d", 0)])
+		require.Equal(t, expectedDef, props[fmt.Sprintf("p%05d", 199)])
+	})
+
+	t.Run("jsonSchemaToGemini end-to-end succeeds", func(t *testing.T) {
+		got, err := jsonSchemaToGemini(schema)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Len(t, got.Properties, 200)
+	})
+}
+
 func TestJsonSchemaToGapic(t *testing.T) {
 	allowedFields := map[string]struct{}{
 		"type":        {},
