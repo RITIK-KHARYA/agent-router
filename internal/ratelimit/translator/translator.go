@@ -175,34 +175,6 @@ func buildBackendDescriptorKeyed(
 	}, allKeyed, nil
 }
 
-// buildPerModelDescriptor creates a descriptor that matches a specific model name.
-// descriptorModelName is used as the model_name_override descriptor value (may differ
-// when a ModelNameOverride is set on the AIGatewayRoute backend ref).
-//
-// Simple case (no bucket rules):
-//
-//	key: model_name_override
-//	value: "gpt-4"
-//	rate_limit:
-//	  requests_per_unit: 100
-//	  unit: MINUTE
-//
-// With bucket rules (client selectors, nested and sorted by header name):
-//
-//	key: model_name_override
-//	value: "gpt-4"
-//	descriptors:
-//	  - key: rule-0-match-0                  ← first header (sorted)
-//	    value: rule-0-match-0
-//	    descriptors:
-//	      - key: rule-0-match-1              ← second header (sorted)
-//	        value: rule-0-match-1
-//	        rate_limit: ...                  ← only on leaf
-func buildPerModelDescriptor(descriptorModelName string, quota *aigv1a1.QuotaDefinition) (*rlsconfv3.RateLimitDescriptor, error) {
-	desc, _, err := buildPerModelDescriptorKeyed(descriptorModelName, quota, "")
-	return desc, err
-}
-
 // buildPerModelDescriptorKeyed creates a model-level descriptor and also returns
 // KeyedDescriptor entries for all leaf descriptors. parentKeyPrefix is the
 // comparable key prefix from ancestor descriptors (e.g., the backend segment).
