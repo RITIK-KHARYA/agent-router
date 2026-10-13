@@ -223,36 +223,6 @@ func (u *TokenUsage) SetReasoningTokens(tokens uint32) {
 	u.reasoningTokenSet = true
 }
 
-// AddInputTokens increments the recorded input tokens and marks the field as set.
-func (u *TokenUsage) AddInputTokens(tokens uint32) {
-	u.inputTokenSet = true
-	u.inputTokens += tokens
-}
-
-// AddOutputTokens increments the recorded output tokens and marks the field as set.
-func (u *TokenUsage) AddOutputTokens(tokens uint32) {
-	u.outputTokenSet = true
-	u.outputTokens += tokens
-}
-
-// AddCachedInputTokens increments the recorded cached input tokens and marks the field as set.
-func (u *TokenUsage) AddCachedInputTokens(tokens uint32) {
-	u.cachedInputTokenSet = true
-	u.cachedInputTokens += tokens
-}
-
-// AddCacheCreationInputTokens increments the recorded cache creation input tokens and marks the field as set.
-func (u *TokenUsage) AddCacheCreationInputTokens(tokens uint32) {
-	u.cacheCreationInputTokenSet = true
-	u.cacheCreationInputTokens += tokens
-}
-
-// AddReasoningTokens increments the recorded reasoning tokens and marks the field as set.
-func (u *TokenUsage) AddReasoningTokens(tokens uint32) {
-	u.reasoningTokenSet = true
-	u.reasoningTokens += tokens
-}
-
 // IsZero reports whether no token usage field has been set.
 func (u *TokenUsage) IsZero() bool {
 	return !u.inputTokenSet && !u.outputTokenSet && !u.totalTokenSet &&
