@@ -154,12 +154,12 @@ func TestBuildServiceQuotaDescriptor(t *testing.T) {
 	})
 }
 
-func TestBuildPerModelDescriptor(t *testing.T) {
+func TestBuildPerModelDescriptorKeyed(t *testing.T) {
 	t.Run("no bucket rules applies default directly", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
 			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
-		desc, err := buildPerModelDescriptor("gpt-4", quota)
+		desc, _, err := buildPerModelDescriptorKeyed("gpt-4", quota, "")
 		require.NoError(t, err)
 		require.Equal(t, ModelNameDescriptorKey, desc.Key)
 		require.Equal(t, "gpt-4", desc.Value)
@@ -175,7 +175,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			},
 			DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 		}
-		desc, err := buildPerModelDescriptor("gpt-4", quota)
+		desc, _, err := buildPerModelDescriptorKeyed("gpt-4", quota, "")
 		require.NoError(t, err)
 		require.Equal(t, "gpt-4", desc.Value)
 		require.Nil(t, desc.RateLimit)      // rate limit on nested descriptors, not parent
@@ -189,7 +189,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			},
 			DefaultBucket: aigv1a1.QuotaValue{Limit: 0}, // zero limit = no default
 		}
-		desc, err := buildPerModelDescriptor("gpt-4", quota)
+		desc, _, err := buildPerModelDescriptorKeyed("gpt-4", quota, "")
 		require.NoError(t, err)
 		require.Len(t, desc.Descriptors, 1) // only the bucket rule
 	})
@@ -203,7 +203,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			},
 			DefaultBucket: aigv1a1.QuotaValue{Limit: 5, Duration: "1s"},
 		}
-		desc, err := buildPerModelDescriptor("model-x", quota)
+		desc, _, err := buildPerModelDescriptorKeyed("model-x", quota, "")
 		require.NoError(t, err)
 		require.Len(t, desc.Descriptors, 4) // 3 bucket rules + 1 default
 
@@ -216,7 +216,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
 			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "invalid"},
 		}
-		_, err := buildPerModelDescriptor("gpt-4", quota)
+		_, _, err := buildPerModelDescriptorKeyed("gpt-4", quota, "")
 		require.Error(t, err)
 	})
 
@@ -226,7 +226,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "bad"}},
 			},
 		}
-		_, err := buildPerModelDescriptor("gpt-4", quota)
+		_, _, err := buildPerModelDescriptorKeyed("gpt-4", quota, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "bucket rule 0")
 	})
