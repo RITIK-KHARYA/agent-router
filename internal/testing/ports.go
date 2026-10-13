@@ -7,10 +7,8 @@ package internaltesting
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -34,24 +32,4 @@ func RequireRandomPorts(t testing.TB, count int) []int {
 		require.NoError(t, lis.Close())
 	}
 	return ports
-}
-
-// AwaitPortClosed waits until the port is no longer listening.
-func AwaitPortClosed(port int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			return nil // Port closed
-		}
-		conn.Close()
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("port %d still listening after %v", port, timeout)
-		}
-		<-ticker.C
-	}
 }
