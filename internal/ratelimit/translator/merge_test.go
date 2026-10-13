@@ -124,19 +124,6 @@ func TestMergeDescriptors_NilRateLimitNotOverwritten(t *testing.T) {
 	require.Equal(t, uint32(100), merged[0].RateLimit.RequestsPerUnit)
 }
 
-func TestMergeKeyedDescriptors(t *testing.T) {
-	entries := []KeyedDescriptor{
-		{ComparableKey: "a", Descriptor: &rlsconfv3.RateLimitDescriptor{Key: "k", Value: "a"}},
-		{ComparableKey: "b", Descriptor: &rlsconfv3.RateLimitDescriptor{Key: "k", Value: "b"}},
-		{ComparableKey: "a", Descriptor: &rlsconfv3.RateLimitDescriptor{Key: "k", Value: "a-dup"}},
-	}
-
-	result := MergeKeyedDescriptors(entries)
-	require.Len(t, result, 2)
-	require.Equal(t, "a", result[0].Descriptor.Value)
-	require.Equal(t, "b", result[1].Descriptor.Value)
-}
-
 func TestMergeDescriptors_PreservesShadowMode(t *testing.T) {
 	descs := []*rlsconfv3.RateLimitDescriptor{
 		{Key: "k", Value: "v", ShadowMode: false},

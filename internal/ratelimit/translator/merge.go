@@ -63,19 +63,3 @@ func MergeDescriptors(descs []*rlsconfv3.RateLimitDescriptor) []*rlsconfv3.RateL
 	}
 	return result
 }
-
-// MergeKeyedDescriptors merges descriptors using their comparable keys.
-// Entries with the same ComparableKey are deduplicated with the first limit
-// taking precedence. Returns the deduplicated KeyedDescriptor list.
-func MergeKeyedDescriptors(entries []KeyedDescriptor) []KeyedDescriptor {
-	seen := make(map[string]bool)
-	var result []KeyedDescriptor
-	for _, e := range entries {
-		if seen[e.ComparableKey] {
-			continue
-		}
-		seen[e.ComparableKey] = true
-		result = append(result, e)
-	}
-	return result
-}
